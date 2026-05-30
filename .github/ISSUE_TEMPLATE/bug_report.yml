@@ -94,7 +94,7 @@ body:
     id: jcd_version
     attributes:
       label: Joy-Con Droid version
-      description: "`adb shell dumpsys package com.rdapps.gamepad | grep versionName | cut -d= -f2`"
+      description: "`adb shell \"dumpsys package com.rdapps.gamepad | grep versionName | cut -d= -f2\"`"
     validations:
       required: true
 
@@ -104,9 +104,8 @@ body:
       label: jcdshim logcat
       description: |
         ```
-        adb logcat -c && \
-        adb shell "am force-stop com.android.bluetooth; sleep 3; svc bluetooth enable" && \
-        sleep 8 && \
+        adb logcat -c
+        adb shell "am force-stop com.android.bluetooth; sleep 3; svc bluetooth enable; sleep 8"
         adb logcat -s jcdshim libc crash_dump64 -d
         ```
       render: text
