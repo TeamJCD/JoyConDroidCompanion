@@ -98,7 +98,8 @@ void write_bt_addr(void)
     }
     write(fd, buf, strlen(buf));
     close(fd);
-    LOGI("write_bt_addr: wrote %s to %s", buf, BTADDR_PATH);
+    LOGI("write_bt_addr: wrote %02X:%02X:%02X:XX:XX:XX to %s",
+         (uint8_t)raw[0], (uint8_t)raw[1], (uint8_t)raw[2], BTADDR_PATH);
 
 done:
     if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
