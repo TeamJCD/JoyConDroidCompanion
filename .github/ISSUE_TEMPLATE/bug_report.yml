@@ -1,0 +1,130 @@
+name: Bug Report
+description: Module does not work or causes problems
+title: "[Manufacturer Model] "
+labels: ["bug"]
+
+body:
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      description: "`adb shell \"getprop ro.product.manufacturer; getprop ro.product.model\"`"
+    validations:
+      required: true
+
+  - type: input
+    id: android_version
+    attributes:
+      label: Android version
+      description: "`adb shell getprop ro.build.version.release`"
+    validations:
+      required: true
+
+  - type: input
+    id: fingerprint
+    attributes:
+      label: Build fingerprint
+      description: "`adb shell getprop ro.build.fingerprint`"
+    validations:
+      required: true
+
+  - type: input
+    id: security_patch
+    attributes:
+      label: Security patch date
+      description: "`adb shell getprop ro.build.version.security_patch`"
+    validations:
+      required: true
+
+  - type: input
+    id: soc
+    attributes:
+      label: SoC
+      description: "`adb shell \"getprop ro.soc.manufacturer; getprop ro.soc.model\"`"
+    validations:
+      required: true
+
+  - type: input
+    id: rom
+    attributes:
+      label: ROM
+      description: "`adb shell getprop ro.build.display.id`"
+    validations:
+      required: true
+
+  - type: input
+    id: magisk_version
+    attributes:
+      label: Magisk version
+      description: "`adb shell magisk -v`"
+    validations:
+      required: true
+
+  - type: input
+    id: bt_lib_path
+    attributes:
+      label: Bluetooth library path
+      description: "`adb shell \"ls /apex/com.android.btservices/lib64/libbluetooth_jni.so /vendor/lib64/libbluetooth_qti.so /system/lib64/libbluetooth_qti.so /system/lib64/libbluetooth.so 2>/dev/null\"`"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: selinux
+    attributes:
+      label: SELinux mode
+      description: "`adb shell getenforce`"
+      options:
+        - Enforcing
+        - Permissive
+    validations:
+      required: true
+
+  - type: dropdown
+    id: console
+    attributes:
+      label: Target console
+      options:
+        - Switch 2
+        - Switch 1
+        - Both
+    validations:
+      required: true
+
+  - type: input
+    id: jcd_version
+    attributes:
+      label: Joy-Con Droid version
+      description: "`adb shell dumpsys package com.rdapps.gamepad | grep versionName | cut -d= -f2`"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logcat
+    attributes:
+      label: jcdshim logcat
+      description: |
+        ```
+        adb logcat -c && \
+        adb shell "am force-stop com.android.bluetooth; sleep 3; svc bluetooth enable" && \
+        sleep 8 && \
+        adb logcat -s jcdshim -d
+        ```
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happens?
+      description: Describe the problem. What did you expect, what actually happens?
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Any other relevant info (kernel version, previous module versions tried, etc.)
+    validations:
+      required: false
