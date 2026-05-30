@@ -1,0 +1,7 @@
+# mmap(MAP_ANON, PROT_RWX) for the orig-stub trampoline buffer.
+allow bluetooth self:process execmem
+
+# /dev/btaddr: MAC address file pre-created by post-fs-data.sh (root),
+# written by the BT shim (bluetooth already has rw on bluetooth_data_file)
+# and read by JCD.
+allow untrusted_app bluetooth_data_file file { open read getattr }
