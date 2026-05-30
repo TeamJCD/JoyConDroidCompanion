@@ -107,7 +107,7 @@ body:
         adb logcat -c && \
         adb shell "am force-stop com.android.bluetooth; sleep 3; svc bluetooth enable" && \
         sleep 8 && \
-        adb logcat -s jcdshim -d
+        adb logcat -s jcdshim libc crash_dump64 -d
         ```
       render: text
     validations:
