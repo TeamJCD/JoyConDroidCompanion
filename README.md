@@ -1,7 +1,7 @@
 # Joy-Con Droid Companion
 
 A Magisk module that patches the Android Bluetooth stack at runtime to fix
-connectivity issues between [Joy-Con Droid](https://github.com/rdapps/JoyConDroid)
+connectivity issues between [Joy-Con Droid](https://github.com/TeamJCD/JoyConDroid)
 and the Switch family of consoles.
 
 ## Background
