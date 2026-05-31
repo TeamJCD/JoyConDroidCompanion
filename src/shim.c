@@ -195,12 +195,44 @@ static void *alloc_orig_stub(uint8_t *fn)
         LOGE("alloc_orig_stub: mmap failed (errno=%d)", errno);
         return NULL;
     }
-    memcpy(stub, fn, 16);
-    ((uint32_t *)stub)[4] = TRAMP_LDR_X17;
-    ((uint32_t *)stub)[5] = TRAMP_BR_X17;
+
+    uint32_t *s = (uint32_t *)stub;
+    uint32_t *f = (uint32_t *)fn;
+    int out = 0;
+
+    for (int i = 0; i < 4; i++) {
+        uint32_t insn = f[i];
+        if ((insn & 0x9F000000u) == 0x90000000u) {
+            /*
+             * ADRP xRd is PC-relative and would compute the wrong page when
+             * executed from the mmap'd stub address.  Replace with an absolute
+             * MOVZ + 2×MOVK sequence (covers 48-bit VAs, sufficient for all
+             * Android devices).  Each ADRP contributes 3 instructions, so
+             * out = 2*n_adrp + 4, which is always even — the 8-byte cont
+             * address stays naturally 8-byte aligned without padding.
+             */
+            uint32_t immlo  = (insn >> 29) & 0x3u;
+            uint32_t immhi  = (insn >> 5)  & 0x7FFFFu;
+            uint32_t imm21u = (immhi << 2) | immlo;
+            int32_t  imm21s = (imm21u & (1u << 20))
+                                ? (int32_t)(imm21u | (~0u << 21))
+                                : (int32_t)imm21u;
+            uintptr_t page  = ((uintptr_t)(fn + i * 4) & ~(uintptr_t)0xFFFu)
+                              + ((intptr_t)imm21s << 12);
+            uint32_t rd = insn & 0x1Fu;
+            s[out++] = 0xD2800000u | ((page         & 0xFFFFu) << 5) | rd; /* MOVZ  Xd,#p[15:0]         */
+            s[out++] = 0xF2A00000u | (((page >> 16) & 0xFFFFu) << 5) | rd; /* MOVK  Xd,#p[31:16],LSL#16 */
+            s[out++] = 0xF2C00000u | (((page >> 32) & 0xFFFFu) << 5) | rd; /* MOVK  Xd,#p[47:32],LSL#32 */
+        } else {
+            s[out++] = insn;
+        }
+    }
+
+    s[out++] = TRAMP_LDR_X17;  /* ldr x17, [pc, #8] */
+    s[out++] = TRAMP_BR_X17;   /* br x17            */
     uint64_t cont = (uint64_t)(fn + 16);
-    memcpy(stub + 24, &cont, 8);
-    flush_icache(stub, 32);
+    memcpy(s + out, &cont, 8);
+    flush_icache(stub, 64);
     return stub;
 }
 
