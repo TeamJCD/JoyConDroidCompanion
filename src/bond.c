@@ -10,8 +10,9 @@
  * overridden: the argument fixes the BTM device record; the global fixes
  * btif_dm_auth_cmpl_evt's decision to persist the link key.
  *
- * Identified by the unique LDRB triple accessing tBTA_DM_SP_CFM_REQ fields
- * just_works/loc_auth_req/rmt_auth_req at struct offsets 264/265/266.
+ * Identified by a LDRB triple accessing three consecutive byte offsets
+ * (N, N+1, N+2) from the same base register in tBTA_DM_SP_CFM_REQ
+ * (just_works / loc_auth_req / rmt_auth_req — offsets vary by vendor build).
  * The call to btm_set_bond_type_dev is then pinpointed by the STRB that
  * immediately precedes it (writing bond_type into pairing_cb.bond_type).
  * The pairing_cb.bond_type address is decoded from the ADRP+ADD pair that
@@ -21,18 +22,15 @@
 #include "shim.h"
 
 /*
- * LDRB wT,[xN,#imm] (unsigned offset): bits[31:10] encode the type+imm12.
- * Mask 0xFFFFFC00 isolates those bits, freeing the register fields.
- *
- * tBTA_DM_SP_CFM_REQ layout (verified against LineageOS source):
- *   +264  bool     just_works
- *   +265  uint8_t  loc_auth_req
- *   +266  uint8_t  rmt_auth_req
+ * LDRB wT,[xN,#imm] unsigned-offset: bits[31:22] = 0011 1001 01.
+ * We scan for ANY three consecutive byte-offsets (N, N+1, N+2) from the
+ * same base register rather than hard-coding the tBTA_DM_SP_CFM_REQ layout.
+ * This makes the scan resilient to vendor struct padding differences.
  */
-#define LDRB_MASK            0xFFFFFC00u
-#define LDRB_JUST_WORKS_VAL  (0x39400000u | (264u << 10u))  /* 0x39442000 */
-#define LDRB_LOC_AUTH_VAL    (0x39400000u | (265u << 10u))  /* 0x39442400 */
-#define LDRB_RMT_AUTH_VAL    (0x39400000u | (266u << 10u))  /* 0x39442800 */
+#define LDRB_ANY_MASK  0xFFC00000u
+#define LDRB_ANY_VAL   0x39400000u
+#define LDRB_OFF(w)    (((w) >> 10) & 0xFFFu)
+#define LDRB_RN(w)     (((w) >>  5) & 0x01Fu)
 
 /* BL label: bits[31:26] = 100101 */
 #define BL_INSN_MASK  0xFC000000u
@@ -102,17 +100,26 @@ static uint8_t *find_bond_fn(const char *libname)
     uint32_t *end = exec + exec_size / 4;
 
     for (uint32_t *p = exec; p + 128 < end; p++) {
-        if ((*p & LDRB_MASK) != LDRB_JUST_WORKS_VAL) continue;
+        if ((*p & LDRB_ANY_MASK) != LDRB_ANY_VAL) continue;
 
-        /* Require loc_auth_req (265) and rmt_auth_req (266) within ±16 insns. */
+        uint32_t off0 = LDRB_OFF(*p);
+        /* just_works follows bd_name[BD_NAME_LEN=248] in tBTA_DM_SP_CFM_REQ,
+         * so the offset is always > 248 regardless of vendor struct padding. */
+        if (off0 < 248u) continue;
+        uint32_t rn0  = LDRB_RN(*p);
+
+        /* Require loads at off0+1 and off0+2 with the same base register. */
         uint32_t *win_lo = (p > exec + 16) ? p - 16 : exec;
         uint32_t *win_hi = (p + 32 < end)  ? p + 32 : end;
-        int has265 = 0, has266 = 0;
+        int has_n1 = 0, has_n2 = 0;
         for (uint32_t *q = win_lo; q < win_hi; q++) {
-            if ((*q & LDRB_MASK) == LDRB_LOC_AUTH_VAL) has265 = 1;
-            if ((*q & LDRB_MASK) == LDRB_RMT_AUTH_VAL) has266 = 1;
+            if ((*q & LDRB_ANY_MASK) != LDRB_ANY_VAL) continue;
+            if (LDRB_RN(*q) != rn0) continue;
+            uint32_t off = LDRB_OFF(*q);
+            if (off == off0 + 1) has_n1 = 1;
+            if (off == off0 + 2) has_n2 = 1;
         }
-        if (!has265 || !has266) continue;
+        if (!has_n1 || !has_n2) continue;
 
         /*
          * Scan forward for the first BL preceded by a STRB within 2 insns.
@@ -141,12 +148,29 @@ static uint8_t *find_bond_fn(const char *libname)
                 break;
             }
 
-            /* Sanity: bond_type_ptr must be outside the exec region (i.e. in .bss). */
-            if (!cand || ((uint8_t *)cand >= (uint8_t *)exec &&
-                          (uint8_t *)cand <  (uint8_t *)exec + exec_size)) {
-                LOGE("find_bond: decoded bond_type_ptr=%p looks invalid, ignoring",
-                     (void *)cand);
-                cand = NULL;
+            /* bond_type_ptr must lie past the exec region (in data/BSS).
+             * Pointers into the R-- header or exec itself are false positives;
+             * skip this BL and keep scanning rather than returning a bad hook. */
+            if (!cand || (uint8_t *)cand < (uint8_t *)exec + exec_size) {
+                LOGE("find_bond: bond_type_ptr=%p not in data/BSS, skipping BL@%p",
+                     (void *)cand, (void *)q);
+                continue;
+            }
+
+            /* btm_set_bond_type_dev is a simple setter — it does not call
+             * other functions in its prologue.  Reject BL targets that have
+             * another BL within their first 8 instructions (wrapper/bridge). */
+            {
+                uint32_t *tgt = (uint32_t *)bl_tgt;
+                int is_wrapper = 0;
+                for (int k = 0; k < 8 && tgt + k < end; k++) {
+                    if ((tgt[k] & BL_INSN_MASK) == BL_INSN_VAL) { is_wrapper = 1; break; }
+                }
+                if (is_wrapper) {
+                    LOGE("find_bond: BL target %p looks like a wrapper, skipping",
+                         (void *)bl_tgt);
+                    continue;
+                }
             }
             g_pairing_cb_bond_type = cand;
             LOGI("find_bond: btm_set_bond_type_dev=%p  bond_type_ptr=%p",
