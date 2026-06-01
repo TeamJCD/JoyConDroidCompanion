@@ -148,3 +148,66 @@ jcdshim  I  write_bt_addr: wrote XX:XX:XX:XX:XX:XX to /dev/btaddr
 If `patch_fn: hooked` lines are missing, the pattern scanner did not find the target
 function — the OEM may have a modified BT stack. Open an issue and attach the output
 of `adb logcat -s jcdshim` and `adb shell getprop ro.build.fingerprint`.
+
+## Fetching Libraries from a Device
+
+`scripts/pull.sh` (Linux/macOS) and `scripts/pull.ps1` (Windows PowerShell 5.1+)
+pull the correct `libbluetooth*.so` from a connected device via `adb` and save it
+to `scripts/libs/<Manufacturer>/<Model>/`. The search order mirrors
+`post-fs-data.sh`: APEX → vendor QTI → system QTI → system.
+
+```sh
+# Linux / macOS
+bash scripts/pull.sh
+
+# Windows (PowerShell 5.1+)
+.\scripts\pull.ps1
+```
+
+The pulled file can then be passed to `scripts/verify_hooks.py` to confirm the
+pattern scanner finds both hooks before flashing.
+
+## Static Pattern Verification
+
+`scripts/verify_hooks.py` statically scans a `libbluetooth*.so` for the same
+patterns used by the runtime hooks — no device required:
+
+```sh
+# Scan a specific library pulled from a device
+python3 scripts/verify_hooks.py "scripts/libs/Sony/Xperia XZ2 Compact/libbluetooth_jni.so"
+
+# Auto-scan all reference libraries under scripts/libs/
+python3 scripts/verify_hooks.py
+```
+
+For each library the script reports the function address found, the
+`bond_type_ptr` location, the struct field offsets, and the prologue type:
+
+```
+======================================================================
+  scripts/./libs/Sony/Xperia XZ2 Compact/libbluetooth_jni.so
+======================================================================
+  Exec segment: 0x002ac000 – 0x00bcf9c0  (9358 KiB)
+  Hook 1 (CoD):  fn=0x00895ee0  (+48 bytes to MOVZ)  ✅
+  Hook 2 (Bond): fn=0x00830f14  bond_type_ptr=0x00c54658  offs=264/265/266  ✅
+             first 4 insns: 0xf800865e 0xa9bd7bfd 0xf9000bf5 0xa9024ff4
+             prologue: SCS_SAVE (standard)
+```
+
+Samsung devices that use an `ADRP`-style prologue are detected and reported
+separately (`prologue: ADRP xN (Samsung-style early-exit preamble)`):
+
+```
+======================================================================
+scripts/./libs/samsung/SM-A055F/libbluetooth_jni.so
+======================================================================
+  Exec segment: 0x002c9000 – 0x00c051d0  (9456 KiB)
+  Hook 1 (CoD):  fn=0x00382b20  (+52 bytes to MOVZ)  ✅
+  Hook 2 (Bond): fn=0x00a44570  bond_type_ptr=0x00cf04f0  offs=264/265/266  ✅
+             first 4 insns: 0xd0001628 0x911d0108 0xf9410108 0xb40002a8
+             prologue: ADRP x8 (Samsung-style early-exit preamble)
+```
+
+The script exits non-zero if any library yields no match, making it suitable
+as a pre-flash check for new firmware images. Use `scripts/pull.sh` (Linux/macOS)
+or `scripts/pull.ps1` (Windows) to pull a library from a connected device first.
