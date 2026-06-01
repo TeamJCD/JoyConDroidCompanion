@@ -146,8 +146,8 @@ jcdshim  I  write_bt_addr: wrote XX:XX:XX:XX:XX:XX to /dev/btaddr
 ```
 
 If `patch_fn: hooked` lines are missing, the pattern scanner did not find the target
-function — the OEM may have a modified BT stack. Open an issue and attach the output
-of `adb logcat -s jcdshim` and `adb shell getprop ro.build.fingerprint`.
+function — the OEM may have a modified BT stack. Open an issue using the steps in
+[Filing a Bug Report](#filing-a-bug-report) below.
 
 ## Fetching Libraries from a Device
 
@@ -211,3 +211,19 @@ scripts/./libs/samsung/SM-A055F/libbluetooth_jni.so
 The script exits non-zero if any library yields no match, making it suitable
 as a pre-flash check for new firmware images. Use `scripts/pull.sh` (Linux/macOS)
 or `scripts/pull.ps1` (Windows) to pull a library from a connected device first.
+
+## Filing a Bug Report
+
+`scripts/collect_info.sh` (Linux/macOS) and `scripts/collect_info.ps1` (Windows
+PowerShell 5.1+) collect all information required by the GitHub issue template in
+one step. The script also restarts Bluetooth automatically to capture the logcat.
+
+```sh
+# Linux / macOS
+bash scripts/collect_info.sh
+
+# Windows (PowerShell 5.1+)
+.\scripts\collect_info.ps1
+```
+
+Copy the output into the corresponding fields of the bug report form.
