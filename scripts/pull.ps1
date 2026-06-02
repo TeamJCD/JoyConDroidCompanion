@@ -14,11 +14,17 @@ if (-not $Manufacturer -or -not $Model) {
     exit 1
 }
 
-# Same priority order as post-fs-data.sh
+# _orig.so variants come first: when the module is already installed the
+# bind-mount overlays the canonical name with the shim, but leaves the
+# renamed original accessible as *_orig.so in the same directory.
 $Candidates = @(
+    "/apex/com.android.btservices/lib64/libbluetooth_jni_orig.so",
     "/apex/com.android.btservices/lib64/libbluetooth_jni.so",
+    "/vendor/lib64/libbluetooth_qti_orig.so",
     "/vendor/lib64/libbluetooth_qti.so",
+    "/system/lib64/libbluetooth_qti_orig.so",
     "/system/lib64/libbluetooth_qti.so",
+    "/system/lib64/libbluetooth_orig.so",
     "/system/lib64/libbluetooth.so"
 )
 
@@ -33,7 +39,8 @@ if (-not $RemotePath) {
     exit 1
 }
 
-$LibName = Split-Path $RemotePath -Leaf
+# Always save under the canonical name (strip _orig suffix if present).
+$LibName = (Split-Path $RemotePath -Leaf) -replace '_orig\.so$', '.so'
 $OutPath = Join-Path $PSScriptRoot "libs\$Manufacturer\$Model\$LibName"
 New-Item -ItemType Directory -Force -Path (Split-Path $OutPath) | Out-Null
 

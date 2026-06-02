@@ -16,11 +16,17 @@ if [ -z "$MANUFACTURER" ] || [ -z "$MODEL" ]; then
     exit 1
 fi
 
-# Same priority order as post-fs-data.sh
+# _orig.so variants come first: when the module is already installed the
+# bind-mount overlays the canonical name with the shim, but leaves the
+# renamed original accessible as *_orig.so in the same directory.
 CANDIDATES=(
+    "/apex/com.android.btservices/lib64/libbluetooth_jni_orig.so"
     "/apex/com.android.btservices/lib64/libbluetooth_jni.so"
+    "/vendor/lib64/libbluetooth_qti_orig.so"
     "/vendor/lib64/libbluetooth_qti.so"
+    "/system/lib64/libbluetooth_qti_orig.so"
     "/system/lib64/libbluetooth_qti.so"
+    "/system/lib64/libbluetooth_orig.so"
     "/system/lib64/libbluetooth.so"
 )
 
@@ -38,7 +44,9 @@ if [ -z "$REMOTE_PATH" ]; then
     exit 1
 fi
 
+# Always save under the canonical name (strip _orig suffix if present).
 LIBNAME=$(basename "$REMOTE_PATH")
+LIBNAME="${LIBNAME/_orig.so/.so}"
 OUT="$SCRIPT_DIR/libs/$MANUFACTURER/$MODEL/$LIBNAME"
 mkdir -p "$(dirname "$OUT")"
 
