@@ -18,13 +18,17 @@ jobs:
 
       - uses: ./.github/actions/setup
 
-      - name: Update module.prop
+      - name: Set version
         run: |
           VERSION="${{ github.ref_name }}"
           VERSION_CODE=$(git rev-list --count HEAD)
           echo "VERSION_CODE=$VERSION_CODE" >> $GITHUB_ENV
           sed -i "s/^version=.*/version=$VERSION/" module.prop
           sed -i "s/^versionCode=.*/versionCode=$VERSION_CODE/" module.prop
+          ZIP_URL="https://github.com/${{ github.repository }}/releases/download/${VERSION}/JoyConDroidCompanion-${VERSION}.zip"
+          jq --arg v "$VERSION" --argjson c "$VERSION_CODE" --arg u "$ZIP_URL" \
+            '.version = $v | .versionCode = $c | .zipUrl = $u' \
+            update.json > update.json.tmp && mv update.json.tmp update.json
 
       - name: Build
         run: make zip
@@ -40,15 +44,10 @@ jobs:
             --generate-notes \
             "JoyConDroidCompanion-${VERSION}.zip"
 
-      - name: Update update.json
+      - name: Commit release metadata
         run: |
-          VERSION="${{ github.ref_name }}"
-          ZIP_URL="https://github.com/${{ github.repository }}/releases/download/${VERSION}/JoyConDroidCompanion-${VERSION}.zip"
-          jq --arg v "$VERSION" --argjson c "${{ env.VERSION_CODE }}" --arg u "$ZIP_URL" \
-            '.version = $v | .versionCode = $c | .zipUrl = $u' \
-            update.json > update.json.tmp && mv update.json.tmp update.json
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add update.json
-          git commit -m "chore: update update.json for ${VERSION}"
+          git add module.prop update.json
+          git commit -m "chore: update module.prop and update.json for ${{ github.ref_name }}"
           git push origin HEAD:${{ github.event.repository.default_branch }}
