@@ -22,6 +22,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <sys/mman.h>
 
 /* ── ELF helpers ── */
@@ -188,8 +190,13 @@ static void flush_icache(void *start, size_t len)
 
 static void *alloc_orig_stub(uint8_t *fn)
 {
+    /*
+     * Allocate as RW first, write the stub, then mprotect to RX.
+     * This W→RX sequence is compatible with Knox/RKP W^X enforcement,
+     * unlike a direct RWX allocation.
+     */
     uint8_t *stub = mmap(NULL, 64,
-                         PROT_READ | PROT_WRITE | PROT_EXEC,
+                         PROT_READ | PROT_WRITE,
                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (stub == MAP_FAILED) {
         LOGE("alloc_orig_stub: mmap failed (errno=%d)", errno);
@@ -232,12 +239,41 @@ static void *alloc_orig_stub(uint8_t *fn)
     s[out++] = TRAMP_BR_X17;   /* br x17            */
     uint64_t cont = (uint64_t)(fn + 16);
     memcpy(s + out, &cont, 8);
+
+    if (mprotect(stub, 64, PROT_READ | PROT_EXEC) != 0) {
+        LOGE("alloc_orig_stub: mprotect RX failed (errno=%d)", errno);
+        munmap(stub, 64);
+        return NULL;
+    }
     flush_icache(stub, 64);
     return stub;
 }
 
 static int patch_fn(uint8_t *fn, void *hook_fn)
 {
+    uint32_t tramp[4];
+    tramp[0] = TRAMP_LDR_X17;
+    tramp[1] = TRAMP_BR_X17;
+    uint64_t h = (uint64_t)hook_fn;
+    memcpy(tramp + 2, &h, 8);
+
+    /*
+     * Try /proc/self/mem first: pwrite bypasses page-table permissions and
+     * works even when Samsung Knox/RKP blocks mprotect(RWX) on code pages.
+     */
+    int fd = open("/proc/self/mem", O_WRONLY);
+    if (fd >= 0) {
+        ssize_t n = pwrite(fd, tramp, 16, (off_t)(uintptr_t)fn);
+        close(fd);
+        if (n == 16) {
+            flush_icache(fn, 16);
+            LOGI("patch_fn: hooked %p -> %p (mem)", fn, hook_fn);
+            return 0;
+        }
+        LOGI("patch_fn: /proc/self/mem pwrite failed (errno=%d), trying mprotect", errno);
+    }
+
+    /* Fallback: mprotect(RWX) — works on AOSP/LineageOS where Knox is absent. */
     uintptr_t page = (uintptr_t)fn & ~(uintptr_t)0xFFFu;
     /* Round fn+16 up to next page boundary to handle page-spanning trampolines. */
     size_t len = (((uintptr_t)fn & 0xFFFu) + 16u + 0xFFFu) & ~(size_t)0xFFFu;
@@ -245,12 +281,9 @@ static int patch_fn(uint8_t *fn, void *hook_fn)
         LOGE("patch_fn: mprotect RWX failed (errno=%d)", errno);
         return -1;
     }
-    ((uint32_t *)fn)[0] = TRAMP_LDR_X17;
-    ((uint32_t *)fn)[1] = TRAMP_BR_X17;
-    uint64_t h = (uint64_t)hook_fn;
-    memcpy(fn + 8, &h, 8);
+    memcpy(fn, tramp, 16);
     flush_icache(fn, 16);
-    LOGI("patch_fn: hooked %p -> %p", fn, hook_fn);
+    LOGI("patch_fn: hooked %p -> %p (mprotect)", fn, hook_fn);
     return 0;
 }
 

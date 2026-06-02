@@ -1,5 +1,9 @@
-# mmap(MAP_ANON, PROT_RWX) for the orig-stub trampoline buffer.
+# mprotect(RX) on the orig-stub trampoline buffer (mmap RW → mprotect RX).
 allow bluetooth self:process execmem
+
+# /proc/self/mem write: used as primary patching path on Samsung Knox devices
+# where mprotect(RWX) on code pages is blocked by RKP at EL2.
+allow bluetooth proc_mem file { write open };
 
 # /dev/btaddr: MAC address file pre-created by post-fs-data.sh (root),
 # written by the BT shim (bluetooth already has rw on bluetooth_data_file)
