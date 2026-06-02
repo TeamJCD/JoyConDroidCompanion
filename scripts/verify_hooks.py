@@ -38,20 +38,49 @@ def parse_exec_segment(path):
 #
 # Pattern: MOVZ wX, #0x0C24  (HCI opcode Write_Class_of_Device)
 # Anchor:  walk back to SCS_SAVE (str x30, [x18], #8)
+#
+# Samsung ships up to 3 independent functions with this pattern; all are
+# hooked at runtime (MAX_COD_HOOKS=4).  The scanner returns every unique
+# function found so the caller can report / validate all of them.
 
 MOVZ_HCI_COD_MASK = 0xFFFFFFE0
 MOVZ_HCI_COD_VAL  = 0x52818480
 SCS_SAVE_INSN     = 0xf800865e
+MAX_COD_HOOKS     = 4
 
-def find_cod_fn(ws, vaddr):
+def _cod_fn_takes_raw_value(ws, fn_idx, movz_idx):
+    """
+    Return True if x0 is used as a raw uint32_t CoD value (not a pointer).
+    Functions with  ADD X*, X0, #imm12  where imm12 >= 64 before the MOVZ
+    treat x0 as a structure pointer and must be skipped (different calling
+    convention — passing cod=0x082500 would crash on first dereference).
+    """
+    ADD_X0_MASK = 0xFF8003E0
+    ADD_X0_VAL  = 0x91000000
+    for k in range(fn_idx, movz_idx):
+        if (ws[k] & ADD_X0_MASK) == ADD_X0_VAL:
+            imm12 = (ws[k] >> 10) & 0xFFF
+            if imm12 >= 64:
+                return False
+    return True
+
+def find_cod_fns(ws, vaddr):
+    """Return list of (fn_va, distance_in_words, hookable) for all CoD-hook candidates."""
     n = len(ws)
+    results = []
+    seen = set()
     for i in range(n):
         if (ws[i] & MOVZ_HCI_COD_MASK) != MOVZ_HCI_COD_VAL:
             continue
         for j in range(i, max(i - 256, -1), -1):
             if ws[j] == SCS_SAVE_INSN:
-                return vaddr + j * 4, i - j  # (fn_va, distance_to_movz)
-    return None, None
+                fn_va = vaddr + j * 4
+                if fn_va not in seen:
+                    seen.add(fn_va)
+                    hookable = _cod_fn_takes_raw_value(ws, j, i)
+                    results.append((fn_va, i - j, hookable))
+                break
+    return results
 
 # ── Hook 2: btm_set_bond_type_dev (Bond) ────────────────────────────────────
 #
@@ -168,10 +197,19 @@ def verify(path):
 
     ok = True
 
-    # Hook 1
-    fn_va, dist = find_cod_fn(ws, vaddr)
-    if fn_va is not None:
-        print(f"  Hook 1 (CoD):  fn=0x{fn_va:08x}  (+{dist * 4} bytes to MOVZ)  ✅")
+    # Hook 1 — may match multiple functions on Samsung
+    cod_fns = find_cod_fns(ws, vaddr)
+    hookable = [(va, d) for va, d, h in cod_fns if h]
+    skipped  = [(va, d) for va, d, h in cod_fns if not h]
+    if hookable:
+        for idx, (fn_va, dist) in enumerate(hookable):
+            tag = "✅" if idx == 0 else "  "
+            suffix = f"  (slot {idx})" if idx > 0 else ""
+            print(f"  Hook 1 (CoD):  fn=0x{fn_va:08x}  (+{dist * 4} bytes to MOVZ)  {tag}{suffix}")
+        for fn_va, dist in skipped:
+            print(f"  Hook 1 (CoD):  fn=0x{fn_va:08x}  (+{dist * 4} bytes to MOVZ)  ⏭  (x0=pointer, skipped)")
+        if len(hookable) > MAX_COD_HOOKS:
+            print(f"  Hook 1 (CoD):  WARNING: {len(hookable)} hookable > MAX_COD_HOOKS={MAX_COD_HOOKS}, excess will be skipped")
     else:
         print(f"  Hook 1 (CoD):  NOT FOUND  ❌")
         ok = False
