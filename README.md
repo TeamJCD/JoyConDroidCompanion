@@ -107,15 +107,19 @@ Expected on Bluetooth start:
 ```
 jcdshim  I  JNI_OnLoad: shim loaded
 jcdshim  I  JNI_OnLoad: orig lib = libbluetooth_jni_orig.so
-jcdshim  I  patch_fn: hooked 0x...    ← Hook 1 installed
+jcdshim  I  patch_fn: hooked 0x...    ← Hook 1 (CoD slot 0) installed
+jcdshim  I  patch_fn: hooked 0x...    ← Hook 1 (CoD slot 1, Samsung only)
 jcdshim  I  patch_fn: hooked 0x...    ← Hook 2 installed
 jcdshim  I  JNI_OnLoad: done
 ```
 
+The `patch_fn` line will include `(mem)` when patching via `/proc/self/mem`
+(Samsung Knox devices) or `(mprotect)` on standard builds.
+
 Expected during pairing with Switch 2:
 
 ```
-jcdshim  I  hook_cod: CoD=0x180508 -> forcing 0x002508
+jcdshim  I  hook_cod[0]: CoD=0x180508 -> forcing 0x002508
 jcdshim  I  hook_bond_type: bond_type=2
 jcdshim  I  hook_bond_type: TEMPORARY -> PERSISTENT
 ```
@@ -138,10 +142,10 @@ Expected output:
 ```
 jcdshim  I  JNI_OnLoad: shim loaded
 jcdshim  I  JNI_OnLoad: orig lib = libbluetooth_jni_orig.so
-jcdshim  I  patch_fn: hooked 0x...    ← Hook 1 installed
-jcdshim  I  patch_fn: hooked 0x...    ← Hook 2 installed
+jcdshim  I  patch_fn: hooked 0x...    ← Hook 1 (CoD) installed
+jcdshim  I  patch_fn: hooked 0x...    ← Hook 2 (Bond) installed
 jcdshim  I  JNI_OnLoad: done
-jcdshim  I  hook_cod: CoD=0x... -> forcing 0x002508
+jcdshim  I  hook_cod[0]: CoD=0x... -> forcing 0x002508
 jcdshim  I  write_bt_addr: wrote XX:XX:XX:XX:XX:XX to /dev/btaddr
 ```
 
@@ -194,17 +198,20 @@ For each library the script reports the function address found, the
              prologue: SCS_SAVE (standard)
 ```
 
-Samsung devices that use an `ADRP`-style prologue are detected and reported
-separately (`prologue: ADRP xN (Samsung-style early-exit preamble)`):
+Samsung devices ship multiple functions that send Write\_Class\_of\_Device.
+All hookable candidates are listed; functions that use `x0` as a structure
+pointer instead of a raw CoD value are skipped automatically (`⏭`):
 
 ```
 ======================================================================
-scripts/./libs/samsung/SM-A055F/libbluetooth_jni.so
+  scripts/libs/samsung/SM-A055M/libbluetooth_jni.so
 ======================================================================
-  Exec segment: 0x002c9000 – 0x00c051d0  (9456 KiB)
+  Exec segment: 0x002c9000 – 0x00c04f70  (9455 KiB)
   Hook 1 (CoD):  fn=0x00382b20  (+52 bytes to MOVZ)  ✅
-  Hook 2 (Bond): fn=0x00a44570  bond_type_ptr=0x00cf04f0  offs=264/265/266  ✅
-             first 4 insns: 0xd0001628 0x911d0108 0xf9410108 0xb40002a8
+  Hook 1 (CoD):  fn=0x00aa74d0  (+48 bytes to MOVZ)      (slot 1)
+  Hook 1 (CoD):  fn=0x007a1b70  (+96 bytes to MOVZ)  ⏭  (x0=pointer, skipped)
+  Hook 2 (Bond): fn=0x00a44330  bond_type_ptr=0x00cef4f0  offs=264/265/266  ✅
+             first 4 insns: 0xb0001628 0x911d0108 0xf9410108 0xb40002a8
              prologue: ADRP x8 (Samsung-style early-exit preamble)
 ```
 
