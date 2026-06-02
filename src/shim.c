@@ -59,7 +59,7 @@ static void *get_lib_base(const char *name)
     }
     fclose(f);
     if (base == (uintptr_t)-1) {
-        LOGE("get_lib_base: '%s' not found", name);
+        LOGI("get_lib_base: '%s' not found", name);
         return NULL;
     }
     return (void *)base;

@@ -152,7 +152,7 @@ static uint8_t *find_bond_fn(const char *libname)
              * Pointers into the R-- header or exec itself are false positives;
              * skip this BL and keep scanning rather than returning a bad hook. */
             if (!cand || (uint8_t *)cand < (uint8_t *)exec + exec_size) {
-                LOGE("find_bond: bond_type_ptr=%p not in data/BSS, skipping BL@%p",
+                LOGI("find_bond: bond_type_ptr=%p not in data/BSS, skipping BL@%p",
                      (void *)cand, (void *)q);
                 continue;
             }
@@ -167,7 +167,7 @@ static uint8_t *find_bond_fn(const char *libname)
                     if ((tgt[k] & BL_INSN_MASK) == BL_INSN_VAL) { is_wrapper = 1; break; }
                 }
                 if (is_wrapper) {
-                    LOGE("find_bond: BL target %p looks like a wrapper, skipping",
+                    LOGI("find_bond: BL target %p looks like a wrapper, skipping",
                          (void *)bl_tgt);
                     continue;
                 }
