@@ -69,7 +69,7 @@ Droid only uses `BluetoothHidDevice`, not `BluetoothHidHost`.
 
 **To install:**
 
-- Android device with Magisk
+- Android 9+ device with Magisk
 - [Joy-Con Droid](https://github.com/TeamJCD/JoyConDroid) installed
 
 ## Building
