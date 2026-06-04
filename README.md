@@ -23,11 +23,14 @@ Security\_Block.
 
 ## How It Works
 
-The module auto-detects the Bluetooth library on the device (APEX-based
-`libbluetooth_jni.so`, system/vendor `libbluetooth.so`, or Qualcomm
-`libbluetooth_qti.so`) and replaces it with a matching shim via a bind-mount
-overlay. The shim loads the original library alongside itself and installs two
-inline trampoline hooks:
+The module has two components:
+
+### BT Stack Shim
+
+Auto-detects the Bluetooth library on the device (APEX-based `libbluetooth_jni.so`,
+system/vendor `libbluetooth.so`, or Qualcomm `libbluetooth_qti.so`) and replaces it
+with a matching shim via a bind-mount overlay. The shim loads the original library
+alongside itself and installs two inline trampoline hooks:
 
 | Hook | Target function | Effect |
 |------|----------------|--------|
@@ -42,12 +45,27 @@ app directory. It provides `getBluetoothAddressNative`, which reads the host Blu
 MAC address from `/dev/btaddr` — a value otherwise unavailable to non-system apps on
 Android 10+ due to the `LOCAL_MAC_ADDRESS` permission requirement.
 
+### Runtime Resource Overlay (RRO)
+
+Some devices ship with `profile_supported_hid_device` set to `false` in
+`com.android.bluetooth`, which prevents Joy-Con Droid from registering as a HID
+device. The module includes a static RRO (`com.github.teamjcd.joycondroidcompanion.rro.hid.apk`)
+that forces this resource to `true` at boot.
+
+The APK is installed to `system/vendor/overlay/com.github.teamjcd.joycondroidcompanion.rro.hid/`
+inside the Magisk module and is applied automatically — no manual overlay activation required.
+
+Only the HID Device profile is enabled; HID Host is left untouched because Joy-Con
+Droid only uses `BluetoothHidDevice`, not `BluetoothHidHost`.
+
 ## Requirements
 
 **To build:**
 
-- Android NDK r30 (`30.0.14904198`) — run `make ndk` to install via sdkmanager
+- Android SDK command-line tools (`sdkmanager`) — included with [Android Studio](https://developer.android.com/studio) or the [standalone command line tools](https://developer.android.com/studio#command-line-tools-only)
+- Android NDK r27d (`27.3.13750724`), build-tools 37.0.0, platform-36 — run `make sdk` to install via sdkmanager
 - `zip`
+- JDK (for `jarsigner` and `keytool`; `keytool` only needed when no keystore is provided via `RRO_KEYSTORE_B64`)
 
 **To install:**
 
@@ -62,21 +80,36 @@ make zip
 
 Output: `build/JoyConDroidCompanion.zip`
 
-### NDK path
+### First-time setup
 
-The build system looks for the NDK at `$ANDROID_HOME/ndk/30.0.14904198` by default.
-Override with `NDK_DIR` if your NDK is installed elsewhere:
-
-```sh
-make zip NDK_DIR=/path/to/android-ndk-r30
-```
-
-Or export it permanently:
+Install all required SDK components:
 
 ```sh
 export ANDROID_HOME=$HOME/Android/Sdk
-make zip
+make sdk   # NDK r27d + build-tools 37.0.0 + platform-36
 ```
+
+### NDK path
+
+The build system looks for the NDK at `$ANDROID_HOME/ndk/27.3.13750724` by default.
+Override with `NDK_DIR` if your NDK is installed elsewhere:
+
+```sh
+make zip NDK_DIR=/path/to/android-ndk-r27d
+```
+
+### RRO signing
+
+Without any environment variables set, `make zip` generates a temporary keystore
+automatically (requires `keytool` from the JDK on `PATH`). To use a persistent
+keystore, set these variables before running `make zip`:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RRO_KEYSTORE_B64` | *(unset)* | Base64-encoded keystore file; if unset, a fresh keystore is generated |
+| `RRO_STOREPASS` | `jcdcrro` | Keystore password |
+| `RRO_KEYPASS` | `jcdcrro` | Key password |
+| `RRO_ALIAS` | `jcdcrro` | Key alias |
 
 ## Installation
 
