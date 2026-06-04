@@ -12,11 +12,13 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           fetch-depth: 0
 
-      - uses: ./.github/actions/setup
+      - name: Setup build environment
+        uses: ./.github/actions/setup
 
       - name: Set version
         run: |
@@ -32,6 +34,11 @@ jobs:
 
       - name: Build
         run: make zip
+        env:
+          RRO_KEYSTORE_B64: ${{ secrets.RRO_KEYSTORE_B64 }}
+          RRO_STOREPASS: ${{ secrets.RRO_STOREPASS }}
+          RRO_KEYPASS: ${{ secrets.RRO_KEYPASS }}
+          RRO_ALIAS: ${{ secrets.RRO_ALIAS }}
 
       - name: Create release
         env:
