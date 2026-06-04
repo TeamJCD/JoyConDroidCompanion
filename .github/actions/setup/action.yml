@@ -4,19 +4,21 @@ description: Installs Android SDK, NDK (with caching) and zip
 runs:
   using: composite
   steps:
-    - uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699  # v4
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699  # v4
 
     - name: Install build dependencies
       shell: bash
       run: sudo apt-get install -y zip
 
-    - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
-      id: cache-ndk
+    - name: Cache Android home
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+      id: cache-android-home
       with:
-        path: ${{ env.ANDROID_HOME }}/ndk
-        key: ndk-${{ hashFiles('Makefile') }}
+        path: ${{ env.ANDROID_HOME }}
+        key: android-home-${{ hashFiles('Makefile') }}
 
-    - name: Install NDK
-      if: steps.cache-ndk.outputs.cache-hit != 'true'
+    - name: Install SDK components
+      if: steps.cache-android-home.outputs.cache-hit != 'true'
       shell: bash
-      run: make ndk
+      run: make sdk
