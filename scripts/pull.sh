@@ -26,6 +26,8 @@ CANDIDATES=(
     "/vendor/lib64/libbluetooth_qti.so"
     "/system/lib64/libbluetooth_qti_orig.so"
     "/system/lib64/libbluetooth_qti.so"
+    "/system/system_ext/lib64/libbluetooth_qti_orig.so"
+    "/system/system_ext/lib64/libbluetooth_qti.so"
     "/system/lib64/libbluetooth_orig.so"
     "/system/lib64/libbluetooth.so"
 )

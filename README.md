@@ -28,7 +28,8 @@ The module has two components:
 ### BT Stack Shim
 
 Auto-detects the Bluetooth library on the device (APEX-based `libbluetooth_jni.so`,
-system/vendor `libbluetooth.so`, or Qualcomm `libbluetooth_qti.so`) and replaces it
+system/vendor `libbluetooth.so`, Qualcomm `libbluetooth_qti.so`, or
+`system_ext`-based QTI variant) and replaces it
 with a matching shim via a bind-mount overlay. The shim loads the original library
 alongside itself and installs two inline trampoline hooks:
 
@@ -191,7 +192,7 @@ function — the OEM may have a modified BT stack. Open an issue using the steps
 `scripts/pull.sh` (Linux/macOS) and `scripts/pull.ps1` (Windows PowerShell 5.1+)
 pull the correct `libbluetooth*.so` from a connected device via `adb` and save it
 to `scripts/libs/<Manufacturer>/<Model>/`. The search order mirrors
-`post-fs-data.sh`: APEX → vendor QTI → system QTI → system.
+`post-fs-data.sh`: APEX → vendor QTI → system QTI → system_ext QTI → system.
 
 ```sh
 # Linux / macOS

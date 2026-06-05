@@ -46,6 +46,8 @@ elif [ -f /vendor/lib64/libbluetooth_qti.so ]; then
     setup_overlay /vendor/lib64 libbluetooth_qti.so
 elif [ -f /system/lib64/libbluetooth_qti.so ]; then
     setup_overlay /system/lib64 libbluetooth_qti.so
+elif [ -f /system/system_ext/lib64/libbluetooth_qti.so ]; then
+    setup_overlay /system/system_ext/lib64 libbluetooth_qti.so
 elif [ -f /system/lib64/libbluetooth.so ]; then
     setup_overlay /system/lib64 libbluetooth.so
 fi
