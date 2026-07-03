@@ -30,6 +30,7 @@ MAGISK=$(adb shell magisk -v 2>/dev/null | tr -d '\r\n' || true)
 
 BT_LIB=$(adb shell \
     "ls /apex/com.android.btservices/lib64/libbluetooth_jni.so \
+        /apex/com.android.bt/lib64/libbluetooth_jni.so \
         /vendor/lib64/libbluetooth_qti.so \
         /system/lib64/libbluetooth_qti.so \
         /system/lib64/libbluetooth.so 2>/dev/null" \

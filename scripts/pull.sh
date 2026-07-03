@@ -22,6 +22,8 @@ fi
 CANDIDATES=(
     "/apex/com.android.btservices/lib64/libbluetooth_jni_orig.so"
     "/apex/com.android.btservices/lib64/libbluetooth_jni.so"
+    "/apex/com.android.bt/lib64/libbluetooth_jni_orig.so"
+    "/apex/com.android.bt/lib64/libbluetooth_jni.so"
     "/vendor/lib64/libbluetooth_qti_orig.so"
     "/vendor/lib64/libbluetooth_qti.so"
     "/system/lib64/libbluetooth_qti_orig.so"

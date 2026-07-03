@@ -64,7 +64,7 @@ body:
     id: bt_lib_path
     attributes:
       label: Bluetooth library path
-      description: "`adb shell \"ls /apex/com.android.btservices/lib64/libbluetooth_jni.so /vendor/lib64/libbluetooth_qti.so /system/lib64/libbluetooth_qti.so /system/lib64/libbluetooth.so 2>/dev/null\"`"
+      description: "`adb shell \"ls /apex/com.android.btservices/lib64/libbluetooth_jni.so /apex/com.android.bt/lib64/libbluetooth_jni.so /vendor/lib64/libbluetooth_qti.so /system/lib64/libbluetooth_qti.so /system/lib64/libbluetooth.so 2>/dev/null\"`"
     validations:
       required: true
 

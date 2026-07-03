@@ -1,5 +1,6 @@
 #!/system/bin/sh
 MODDIR="${0%/*}"
+
 chmod 755 "$MODDIR/patch_sym"
 
 # Sets up a bind-mount overlay over LIB_DIR, replacing LIB_NAME with the shim.
@@ -39,9 +40,12 @@ chmod 0644 /dev/btaddr
 chcon u:object_r:bluetooth_data_file:s0 /dev/btaddr
 
 APEX_LIB=/apex/com.android.btservices/lib64
+APEX_LIB_LEGACY=/apex/com.android.bt/lib64
 
 if [ -f "$APEX_LIB/libbluetooth_jni.so" ]; then
     setup_overlay "$APEX_LIB" libbluetooth_jni.so
+elif [ -f "$APEX_LIB_LEGACY/libbluetooth_jni.so" ]; then
+    setup_overlay "$APEX_LIB_LEGACY" libbluetooth_jni.so
 elif [ -f /vendor/lib64/libbluetooth_qti.so ]; then
     setup_overlay /vendor/lib64 libbluetooth_qti.so
 elif [ -f /system/lib64/libbluetooth_qti.so ]; then

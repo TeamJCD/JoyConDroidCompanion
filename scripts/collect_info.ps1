@@ -32,7 +32,7 @@ $Magisk = try {
 if (-not $Magisk) { $Magisk = "(not found)" }
 
 $BtLib = (& adb shell `
-    "ls /apex/com.android.btservices/lib64/libbluetooth_jni.so /vendor/lib64/libbluetooth_qti.so /system/lib64/libbluetooth_qti.so /system/lib64/libbluetooth.so 2>/dev/null" `
+    "ls /apex/com.android.btservices/lib64/libbluetooth_jni.so /apex/com.android.bt/lib64/libbluetooth_jni.so /vendor/lib64/libbluetooth_qti.so /system/lib64/libbluetooth_qti.so /system/lib64/libbluetooth.so 2>/dev/null" `
     2>$null) -replace "`r", ""
 
 $JcdVer = try {
