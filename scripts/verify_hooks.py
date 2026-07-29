@@ -118,6 +118,85 @@ def _decode_adrp_add(ws, a, vaddr):
         imm12 <<= 12
     return (page + imm12) & 0xFFFFFFFFFFFFFFFF
 
+def _reg_from_local_adrp(ws, wl, i, rn):
+    """True if register `rn` is ever the destination of an ADRP within
+    [wl, i) — i.e. its value likely comes from a static/global address
+    rather than a genuine function-parameter struct pointer."""
+    for a in range(wl, i):
+        if (ws[a] & ADRP_MASK) == ADRP_VAL and (ws[a] & 0x1F) == rn:
+            return True
+    return False
+
+# ── Hook 2 strategy 2: setter-shape scan (src/bond_setter_scan.c) ──────────
+#
+# Mirrors bond_setter_scan.c: scans for btm_set_bond_type_dev's own shape
+# (two lookup calls to the same target, a third distinct "resolve" call,
+# then a byte-store through x0 using a register forwarded from w1 near the
+# function's start) instead of anchoring on its caller. See that file's
+# header for the full rationale and verification notes.
+
+BL_MASK_SETTER  = 0xFC000000
+BL_VAL_SETTER   = 0x94000000
+MOV_W1_MASK     = 0xFFFFFFE0
+MOV_W1_VAL      = 0x2A0103E0
+STRB_MASK_SETTER = 0xFFC00000
+STRB_VAL_SETTER  = 0x39000000
+
+SETTER_SCAN_WINDOW   = 64
+SETTER_FWD_WINDOW    = 12
+SETTER_STRB_AFTER_BL = 4
+
+def _bl_target(ws, idx, vaddr):
+    imm26 = ws[idx] & 0x03FFFFFF
+    if imm26 & (1 << 25):
+        imm26 -= (1 << 26)
+    return (vaddr + idx * 4 + imm26 * 4) & 0xFFFFFFFFFFFFFFFF
+
+def _check_setter_candidate(ws, p, n, vaddr):
+    fwin_hi = min(p + SETTER_FWD_WINDOW, n)
+    fwd_regs = [ws[q] & 0x1F for q in range(p, fwin_hi) if (ws[q] & MOV_W1_MASK) == MOV_W1_VAL]
+    if not fwd_regs:
+        return None
+
+    win_hi = min(p + SETTER_SCAN_WINDOW, n)
+    bl_targets = []
+    have_repeat = False
+    repeat_target = None
+
+    for q in range(p, win_hi):
+        if (ws[q] & BL_MASK_SETTER) != BL_VAL_SETTER:
+            continue
+        tgt = _bl_target(ws, q, vaddr)
+
+        if not have_repeat:
+            if tgt in bl_targets:
+                have_repeat = True
+                repeat_target = tgt
+            bl_targets.append(tgt)
+            continue
+        if tgt == repeat_target:
+            continue
+
+        strb_hi = min(q + 1 + SETTER_STRB_AFTER_BL, win_hi)
+        for s in range(q + 1, strb_hi):
+            if (ws[s] & STRB_MASK_SETTER) != STRB_VAL_SETTER:
+                continue
+            rt = ws[s] & 0x1F
+            rn = (ws[s] >> 5) & 0x1F
+            if rn != 0:
+                continue
+            if rt in fwd_regs:
+                return p
+    return None
+
+def find_bond_fn_by_setter_shape(ws, vaddr):
+    n = len(ws)
+    matches = [p for p in range(n - SETTER_SCAN_WINDOW)
+               if ws[p] == SCS_SAVE_INSN and _check_setter_candidate(ws, p, n, vaddr) is not None]
+    if len(matches) != 1:
+        return None
+    return vaddr + matches[0] * 4
+
 def find_bond_fn(ws, vaddr, exec_sz):
     exec_end = vaddr + exec_sz
     n = len(ws)
@@ -131,6 +210,8 @@ def find_bond_fn(ws, vaddr, exec_sz):
         rn0  = (ws[i] >> 5) & 0x1F
 
         wl = max(0, i - 16)
+        if _reg_from_local_adrp(ws, wl, i, rn0):
+            continue
         wh = min(n, i + 32)
         n1 = n2 = 0
         for q in range(wl, wh):
@@ -149,21 +230,27 @@ def find_bond_fn(ws, vaddr, exec_sz):
         for q in range(i, min(i + 256, n)):
             if (ws[q] & BL_MASK) != BL_VAL:
                 continue
-            has_strb = (
-                (q >= 1 and (ws[q - 1] & STRB_MASK) == STRB_VAL) or
-                (q >= 2 and (ws[q - 2] & STRB_MASK) == STRB_VAL)
-            )
-            if not has_strb:
+            strb_idx = None
+            if q >= 1 and (ws[q - 1] & STRB_MASK) == STRB_VAL:
+                strb_idx = q - 1
+            elif q >= 2 and (ws[q - 2] & STRB_MASK) == STRB_VAL:
+                strb_idx = q - 2
+            if strb_idx is None:
                 continue
+            strb_rn = (ws[strb_idx] >> 5) & 0x1F
 
             imm26 = ws[q] & 0x03FFFFFF
             if imm26 & (1 << 25):
                 imm26 -= (1 << 26)
             bl_tgt = (vaddr + q * 4 + imm26 * 4) & 0xFFFFFFFFFFFFFFFF
 
+            # ADRP+ADD's destination register must match the STRB's base
+            # register — otherwise this pair isn't the one feeding that STRB.
             bond_ptr = None
             for a in range(max(i, q - 16), q - 1):
-                if (ws[a] & ADRP_MASK) == ADRP_VAL and (ws[a + 1] & ADD_IMM_MASK) == ADD_IMM_VAL:
+                if ((ws[a] & ADRP_MASK) == ADRP_VAL and
+                        (ws[a + 1] & ADD_IMM_MASK) == ADD_IMM_VAL and
+                        (ws[a] & 0x1F) == strb_rn):
                     bond_ptr = _decode_adrp_add(ws, a, vaddr)
                     break
 
@@ -226,6 +313,9 @@ def verify(path):
             print(f"             prologue: SCS_SAVE (standard)")
         elif (ws[fn_idx] & ADRP_MASK) == ADRP_VAL:
             print(f"             prologue: ADRP x{ws[fn_idx] & 0x1f} (Samsung-style early-exit preamble)")
+    elif (setter_va := find_bond_fn_by_setter_shape(ws, vaddr)) is not None:
+        print(f"  Hook 2 (Bond): generic scanner found nothing, but setter-shape scan"
+              f"  ✅  (bond_setter_scan.c, fn=0x{setter_va:08x})")
     else:
         print(f"  Hook 2 (Bond): NOT FOUND  ❌")
         ok = False

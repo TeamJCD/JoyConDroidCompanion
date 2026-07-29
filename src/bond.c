@@ -17,6 +17,21 @@
  * immediately precedes it (writing bond_type into pairing_cb.bond_type).
  * The pairing_cb.bond_type address is decoded from the ADRP+ADD pair that
  * loads it at the same call site.
+ *
+ * Two extra guards (added 2026-07-27 after a false positive on a Samsung
+ * Android-16 "Gabeldorsche" stack, SM-F946B): that device's dispatcher has
+ * an unrelated LDRB triple reading a static lookup table, and a nearby STRB
+ * that writes to the stack rather than to the ADRP+ADD-decoded address —
+ * the old checks alone accepted it anyway, and hooking it would corrupt an
+ * unrelated, frequently-called BD_ADDR-keyed record lookup (its 2nd arg is
+ * a packed BD_ADDR, not a bond_type). Both guards are structural properties
+ * the real call site always has, so they should only reject false matches:
+ *  - reg_from_local_adrp: rn0 (the LDRB triple's base register) must be a
+ *    genuine struct-pointer argument, not itself loaded from a static
+ *    address via a local ADRP in the same window.
+ *  - the STRB's base register (where it writes) must be the same register
+ *    the ADRP+ADD pair just computed — otherwise the ADRP+ADD we decoded
+ *    isn't the one feeding this particular STRB.
  */
 
 #include "shim.h"
@@ -47,6 +62,9 @@
 /* STRB wN,[xM,#imm] (unsigned offset): bits[31:22] = 0011100100 */
 #define STRB_MASK  0xFFC00000u
 #define STRB_VAL   0x39000000u
+#define STRB_RN(w) (((w) >> 5) & 0x01Fu)  /* base register (address written to) */
+
+#define ADRP_RD(w) ((w) & 0x01Fu)
 
 #define BOND_TYPE_PERSISTENT  1u
 #define BOND_TYPE_TEMPORARY   2u
@@ -92,6 +110,18 @@ static volatile uint8_t *decode_adrp_add(const uint32_t *a)
     return (volatile uint8_t *)(page + imm12);
 }
 
+/* True if register `rn` is ever the destination of an ADRP within
+ * [win_lo, p) — i.e. its value likely comes from a static/global address
+ * rather than a genuine function-parameter struct pointer. */
+static int reg_from_local_adrp(uint32_t *win_lo, uint32_t *p, uint32_t rn)
+{
+    for (uint32_t *a = win_lo; a < p; a++) {
+        if ((*a & ADRP_MASK) != ADRP_VAL) continue;
+        if (ADRP_RD(*a) == rn) return 1;
+    }
+    return 0;
+}
+
 static uint8_t *find_bond_fn(const char *libname)
 {
     size_t exec_size = 0;
@@ -110,6 +140,7 @@ static uint8_t *find_bond_fn(const char *libname)
 
         /* Require loads at off0+1 and off0+2 with the same base register. */
         uint32_t *win_lo = (p > exec + 16) ? p - 16 : exec;
+        if (reg_from_local_adrp(win_lo, p, rn0)) continue;
         uint32_t *win_hi = (p + 32 < end)  ? p + 32 : end;
         int has_n1 = 0, has_n2 = 0;
         for (uint32_t *q = win_lo; q < win_hi; q++) {
@@ -130,20 +161,23 @@ static uint8_t *find_bond_fn(const char *libname)
         for (uint32_t *q = p; q < p + 256 && q < end; q++) {
             if ((*q & BL_INSN_MASK) != BL_INSN_VAL) continue;
 
-            int has_strb = 0;
-            if (q >= p + 1 && ((*(q - 1) & STRB_MASK) == STRB_VAL)) has_strb = 1;
-            if (q >= p + 2 && ((*(q - 2) & STRB_MASK) == STRB_VAL)) has_strb = 1;
-            if (!has_strb) continue;
+            uint32_t *strb_insn = NULL;
+            if (q >= p + 1 && ((*(q - 1) & STRB_MASK) == STRB_VAL)) strb_insn = q - 1;
+            else if (q >= p + 2 && ((*(q - 2) & STRB_MASK) == STRB_VAL)) strb_insn = q - 2;
+            if (!strb_insn) continue;
 
             int32_t   imm26  = (int32_t)((*q & 0x03FFFFFFu) << 6) >> 6;
             uintptr_t bl_tgt = (uintptr_t)q + (int64_t)imm26 * 4;
 
-            /* Decode ADRP+ADD within 16 insns before this BL. */
+            /* Decode ADRP+ADD within 16 insns before this BL, and require its
+             * destination register to be the same one the STRB writes into —
+             * otherwise this ADRP+ADD isn't the pair feeding that STRB. */
             uint32_t *adrp_lo = (q > p + 16) ? q - 16 : p;
             volatile uint8_t *cand = NULL;
             for (uint32_t *a = adrp_lo; a + 1 < q; a++) {
                 if ((*a & ADRP_MASK) != ADRP_VAL) continue;
                 if ((*(a + 1) & ADD_IMM_MASK) != ADD_IMM_VAL) continue;
+                if (ADRP_RD(*a) != STRB_RN(*strb_insn)) continue;
                 cand = decode_adrp_add(a);
                 break;
             }
@@ -182,11 +216,19 @@ static uint8_t *find_bond_fn(const char *libname)
     return NULL;
 }
 
-void install_bond_hook(const char *libname)
+/* Returns 1 if the generic heuristic found and hooked btm_set_bond_type_dev,
+ * 0 if it found nothing — callers should fall back to the setter-shape scan
+ * (see bond_setter_scan.c) rather than leaving the bond-type bug unpatched. */
+int install_bond_hook(const char *libname)
 {
     uint8_t *fn = find_bond_fn(libname);
-    if (fn)
-        install_hook(fn, hook_bond, (void **)&g_orig_stub);
-    else
-        LOGE("install_bond_hook: btm_set_bond_type_dev not found — persistent bond fix disabled");
+    if (!fn) {
+        LOGE("install_bond_hook: btm_set_bond_type_dev not found via generic heuristic");
+        return 0;
+    }
+    if (install_hook(fn, hook_bond, (void **)&g_orig_stub) != 0) {
+        LOGE("install_bond_hook: failed to install hook @ %p", (void *)fn);
+        return 0;
+    }
+    return 1;
 }

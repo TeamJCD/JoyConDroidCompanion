@@ -41,6 +41,13 @@ alongside itself and installs two inline trampoline hooks:
 Both functions are located by pattern-scanning the executable segment of the
 loaded library — no hardcoded offsets, no debug symbols required.
 
+Some vendor Bluetooth stacks restructure the code enough that the generic
+Hook 2 scan finds nothing (confirmed on Samsung's Android 16 "Gabeldorsche"
+stack, e.g. Galaxy Z Fold SM-F946B). For those, the module tries a second,
+still scan-based strategy that looks for the target function's own
+instruction shape instead of anchoring on its (in this case unrecognizable)
+caller — see `src/bond_setter_scan.c`.
+
 A separate JNI library (`libjoycondroid_jni.so`) is deployed into the Joy-Con Droid
 app directory. It provides `getBluetoothAddressNative`, which reads the host Bluetooth
 MAC address from `/dev/btaddr` — a value otherwise unavailable to non-system apps on
@@ -252,6 +259,13 @@ pointer instead of a raw CoD value are skipped automatically (`⏭`):
 The script exits non-zero if any library yields no match, making it suitable
 as a pre-flash check for new firmware images. Use `scripts/pull.sh` (Linux/macOS)
 or `scripts/pull.ps1` (Windows) to pull a library from a connected device first.
+
+If the generic Hook 2 scan finds nothing but the setter-shape scan (see
+above) matches, the script reports that instead of a plain failure:
+
+```
+  Hook 2 (Bond): generic scanner found nothing, but setter-shape scan  ✅  (bond_setter_scan.c, fn=0x008ed088)
+```
 
 ## Filing a Bug Report
 

@@ -354,7 +354,8 @@ JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *reserved)
     if (!installed) {
         btaddr_init(env);
         install_cod_hook(orig_lib);
-        install_bond_hook(orig_lib);
+        if (!install_bond_hook(orig_lib))
+            install_bond_hook_setter_scan(orig_lib);
         installed = 1;
     }
 
