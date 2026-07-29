@@ -1,3 +1,9 @@
 .idea
 build
 rro.keystore
+
+# Vendor libbluetooth*.so reference libraries (scripts/pull.sh/.ps1 output) —
+# these are OEM property, not ours to redistribute. Keep the folder itself
+# (via .gitkeep) so `scripts/libs/` exists in a fresh clone.
+scripts/libs/*
+!scripts/libs/.gitkeep
