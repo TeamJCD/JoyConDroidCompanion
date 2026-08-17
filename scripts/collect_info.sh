@@ -33,6 +33,7 @@ BT_LIB=$(adb shell \
         /apex/com.android.bt/lib64/libbluetooth_jni.so \
         /vendor/lib64/libbluetooth_qti.so \
         /system/lib64/libbluetooth_qti.so \
+        /system/system_ext/lib64/libbluetooth_qti.so \
         /system/lib64/libbluetooth.so 2>/dev/null" \
     | tr -d '\r')
 
