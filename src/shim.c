@@ -316,9 +316,36 @@ void on_stack_ready(void)
 /* ── Entry point ── */
 
 static const char * const ORIG_LIB_CANDIDATES[] = {
-    "libbluetooth_jni_orig.so",   /* APEX-based Bluetooth (Mainline module) */
-    "libbluetooth_orig.so",       /* non-APEX Bluetooth (/system or /vendor) */
-    "libbluetooth_qti_orig.so",   /* Qualcomm non-APEX */
+    "libbluetooth_jni_orig.so",       /* APEX-based Bluetooth (Mainline module) */
+    "libbluetooth_orig.so",           /* non-APEX Bluetooth (/system or /vendor) */
+    "libbluetooth_qti_orig.so",       /* Qualcomm non-APEX */
+    "libbluetooth_qti_jni_orig.so",   /* Qualcomm split-stack JNI wrapper */
+    NULL
+};
+
+/*
+ * Plain (non-"_orig") SONAME for each candidate above, position-matched —
+ * the name a genuine, unmodified vendor lib would carry if it's loaded as a
+ * DT_NEEDED dependency rather than being the file we bind-mounted over.
+ *
+ * Used as hook-scan fallback targets: on some Qualcomm split-stack devices,
+ * JNI_OnLoad lives in a thin "*_qti_jni.so" wrapper while the actual
+ * CoD/Bond code stays in "libbluetooth_qti.so" (its DT_NEEDED dependency,
+ * left completely untouched on disk). The dynamic linker always maps a
+ * library's dependencies before calling its JNI_OnLoad, so by the time ours
+ * runs, the real vendor lib is already resolvable in /proc/self/maps under
+ * its own name — no rename/dlopen trick needed for it.
+ *
+ * We don't hardcode which ORIG_LIB_CANDIDATES entry pairs with which split
+ * target, since any of them could turn out to be a thin wrapper on some
+ * future device: install_hooks() below tries the matched orig lib first,
+ * and only sweeps this list if that comes up empty.
+ */
+static const char * const PLAIN_LIB_CANDIDATES[] = {
+    "libbluetooth_jni.so",
+    "libbluetooth.so",
+    "libbluetooth_qti.so",
+    "libbluetooth_qti_jni.so",
     NULL
 };
 
@@ -328,6 +355,35 @@ static const char *find_orig_lib(void)
         if (find_exported_sym(ORIG_LIB_CANDIDATES[i], "JNI_OnLoad"))
             return ORIG_LIB_CANDIDATES[i];
     return NULL;
+}
+
+/*
+ * Installs CoD + Bond hooks, scanning orig_lib first (the common case where
+ * it contains the real stack code) and falling back to each other known
+ * vendor lib SONAME — still mapped in the process but not itself matched
+ * above — if orig_lib turns out to be a thin JNI-only wrapper.
+ */
+static void install_hooks(const char *orig_lib)
+{
+    int n_cod  = install_cod_hook(orig_lib);
+    int n_bond = install_bond_hook(orig_lib);
+    if (!n_bond) n_bond = install_bond_hook_setter_scan(orig_lib);
+
+    for (int i = 0; PLAIN_LIB_CANDIDATES[i] && (!n_cod || !n_bond); i++) {
+        const char *lib = PLAIN_LIB_CANDIDATES[i];
+        if (!n_cod) {
+            n_cod = install_cod_hook(lib);
+            if (n_cod) LOGI("install_hooks: CoD target found in fallback lib %s", lib);
+        }
+        if (!n_bond) {
+            n_bond = install_bond_hook(lib);
+            if (!n_bond) n_bond = install_bond_hook_setter_scan(lib);
+            if (n_bond) LOGI("install_hooks: Bond target found in fallback lib %s", lib);
+        }
+    }
+
+    if (!n_cod)  LOGE("install_hooks: CoD target not found in any known library");
+    if (!n_bond) LOGE("install_hooks: Bond target not found in any known library");
 }
 
 JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *reserved)
@@ -353,9 +409,7 @@ JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *reserved)
     static int installed = 0;
     if (!installed) {
         btaddr_init(env);
-        install_cod_hook(orig_lib);
-        if (!install_bond_hook(orig_lib))
-            install_bond_hook_setter_scan(orig_lib);
+        install_hooks(orig_lib);
         installed = 1;
     }
 

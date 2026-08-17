@@ -46,6 +46,17 @@ if [ -f "$APEX_LIB/libbluetooth_jni.so" ]; then
     setup_overlay "$APEX_LIB" libbluetooth_jni.so
 elif [ -f "$APEX_LIB_LEGACY/libbluetooth_jni.so" ]; then
     setup_overlay "$APEX_LIB_LEGACY" libbluetooth_jni.so
+# Qualcomm split-stack: JNI_OnLoad lives in a thin *_qti_jni.so wrapper, the
+# CoD/Bond code stays in libbluetooth_qti.so (its DT_NEEDED dependency, left
+# untouched — the shim locates and hooks it live in memory). Must be checked
+# before the plain libbluetooth_qti.so branches below, since on these devices
+# only the _jni wrapper may be bind-mounted, never the vendor lib itself.
+elif [ -f /vendor/lib64/libbluetooth_qti_jni.so ]; then
+    setup_overlay /vendor/lib64 libbluetooth_qti_jni.so
+elif [ -f /system/lib64/libbluetooth_qti_jni.so ]; then
+    setup_overlay /system/lib64 libbluetooth_qti_jni.so
+elif [ -f /system/system_ext/lib64/libbluetooth_qti_jni.so ]; then
+    setup_overlay /system/system_ext/lib64 libbluetooth_qti_jni.so
 elif [ -f /vendor/lib64/libbluetooth_qti.so ]; then
     setup_overlay /vendor/lib64 libbluetooth_qti.so
 elif [ -f /system/lib64/libbluetooth_qti.so ]; then

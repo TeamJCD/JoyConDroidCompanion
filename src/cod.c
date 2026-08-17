@@ -67,11 +67,11 @@ static int cod_fn_takes_raw_value(uint32_t *fn_start, uint32_t *movz_pos)
     return 1;
 }
 
-void install_cod_hook(const char *libname)
+int install_cod_hook(const char *libname)
 {
     size_t exec_size = 0;
     uint32_t *exec = (uint32_t *)get_lib_exec_range(libname, &exec_size);
-    if (!exec) return;
+    if (!exec) return 0;
     uint32_t *end = exec + exec_size / 4;
 
     int n_installed = 0;
@@ -122,4 +122,5 @@ void install_cod_hook(const char *libname)
         LOGE("install_cod_hook: btsnd_hcic_write_dev_class not found — CoD fix disabled");
     else
         LOGI("install_cod_hook: %d hook(s) installed", n_installed);
+    return n_installed;
 }

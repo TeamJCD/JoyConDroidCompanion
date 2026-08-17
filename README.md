@@ -28,10 +28,10 @@ The module has two components:
 ### BT Stack Shim
 
 Auto-detects the Bluetooth library on the device (APEX-based `libbluetooth_jni.so`,
-system/vendor `libbluetooth.so`, Qualcomm `libbluetooth_qti.so`, or
-`system_ext`-based QTI variant) and replaces it
-with a matching shim via a bind-mount overlay. The shim loads the original library
-alongside itself and installs two inline trampoline hooks:
+system/vendor `libbluetooth.so`, Qualcomm `libbluetooth_qti.so`, `system_ext`-based
+QTI variant, or the older split-stack `libbluetooth_jni.so`/`libbluetooth_qti_jni.so`
+— see below) and replaces it with a matching shim via a bind-mount overlay. The shim
+loads the original library alongside itself and installs two inline trampoline hooks:
 
 | Hook | Target function | Effect |
 |------|----------------|--------|
@@ -47,6 +47,14 @@ stack, e.g. Galaxy Z Fold SM-F946B). For those, the module tries a second,
 still scan-based strategy that looks for the target function's own
 instruction shape instead of anchoring on its (in this case unrecognizable)
 caller — see `src/bond_setter_scan.c`.
+
+On some (typically older, pre-mainline-APEX) BT stacks, `JNI_OnLoad` lives in
+a separate, thin wrapper library from the one containing the CoD/Bond target
+functions — the latter is loaded alongside it as an unmodified `DT_NEEDED`
+dependency. The shim always scans the library it hooked `JNI_OnLoad` in
+first; if neither target is found there, it sweeps the other known library
+names still resolvable in `/proc/self/maps` and retries — no hardcoded
+pairing between the two files required.
 
 A separate JNI library (`libjoycondroid_jni.so`) is deployed into the Joy-Con Droid
 app directory. It provides `getBluetoothAddressNative`, which reads the host Bluetooth

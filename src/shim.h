@@ -17,7 +17,7 @@ extern JavaVM *g_jvm;
 void *get_lib_exec_range(const char *name, size_t *size_out);
 int   install_hook(uint8_t *fn, void *hook_fn, void **orig_stub_out);
 
-void install_cod_hook(const char *libname);
+int  install_cod_hook(const char *libname);
 int  install_bond_hook(const char *libname);
 int  install_bond_hook_setter_scan(const char *libname);
 

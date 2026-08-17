@@ -29,10 +29,11 @@ ZIP     = $(BUILD)/JoyConDroidCompanion.zip
 
 # --- Shim -----------------------------------------------------------------
 SHIM_SRCS = src/shim.c src/cod.c src/bond.c src/bond_setter_scan.c src/btaddr.c
-# One variant per BT library (APEX / pre-APEX / QTI).
+# One variant per BT library (APEX / pre-APEX / QTI / QTI split-stack).
 SHIMS     = $(BUILD)/libbluetooth_jni_shim.so \
             $(BUILD)/libbluetooth_shim.so \
-            $(BUILD)/libbluetooth_qti_shim.so
+            $(BUILD)/libbluetooth_qti_shim.so \
+            $(BUILD)/libbluetooth_qti_jni_shim.so
 
 # --- RRO ------------------------------------------------------------------
 RRO_APK_NAME   = com.github.teamjcd.joycondroidcompanion.rro.hid
@@ -111,6 +112,7 @@ endef
 $(eval $(call shim-variant,_jni))
 $(eval $(call shim-variant,))
 $(eval $(call shim-variant,_qti))
+$(eval $(call shim-variant,_qti_jni))
 
 # JNI library for Joy-Con Droid — Bionic libc.so DT_NEEDED added automatically.
 $(JNI): src/jni.c | $(NDK_CC) $(NDK_STRIP) $(BUILD)
