@@ -8,7 +8,7 @@ NDK_CFLAGS  = -fPIC -O2 -Wl,--hash-style=gnu
 
 # --- Android SDK ----------------------------------------------------------
 BUILD_TOOLS_VERSION = 37.0.0
-PLATFORM_VERSION    = 36
+PLATFORM_VERSION    = 37.0
 SDKMANAGER          = $(ANDROID_HOME)/cmdline-tools/latest/bin/sdkmanager
 BUILD_TOOLS         = $(ANDROID_HOME)/build-tools/$(BUILD_TOOLS_VERSION)
 ANDROID_JAR         = $(ANDROID_HOME)/platforms/android-$(PLATFORM_VERSION)/android.jar

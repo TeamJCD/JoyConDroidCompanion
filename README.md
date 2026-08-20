@@ -82,7 +82,7 @@ Droid only uses `BluetoothHidDevice`, not `BluetoothHidHost`.
 **To build:**
 
 - Android SDK command-line tools (`sdkmanager`) — included with [Android Studio](https://developer.android.com/studio) or the [standalone command line tools](https://developer.android.com/studio#command-line-tools-only)
-- Android NDK r27d (`27.3.13750724`), build-tools 37.0.0, platform-36 — run `make sdk` to install via sdkmanager
+- Android NDK r27d (`27.3.13750724`), build-tools 37.0.0, platform-37.0 — run `make sdk` to install via sdkmanager
 - `zip`
 - JDK (for `jarsigner` and `keytool`; `keytool` only needed when no keystore is provided via `RRO_KEYSTORE_B64`)
 
@@ -105,7 +105,7 @@ Install all required SDK components:
 
 ```sh
 export ANDROID_HOME=$HOME/Android/Sdk
-make sdk   # NDK r27d + build-tools 37.0.0 + platform-36
+make sdk   # NDK r27d + build-tools 37.0.0 + platform-37.0
 ```
 
 ### NDK path
