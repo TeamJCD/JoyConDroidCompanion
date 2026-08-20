@@ -1,7 +1,7 @@
 id=JoyConDroidCompanion
 name=Joy-Con Droid Companion
-version=1.0.5
-versionCode=41
+version=1.1.0
+versionCode=44
 author=TeamJCD
 description=Companion module for Joy-Con Droid
 updateJson=https://raw.githubusercontent.com/TeamJCD/JoyConDroidCompanion/main/update.json
