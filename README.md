@@ -31,22 +31,25 @@ Auto-detects the Bluetooth library on the device (APEX-based `libbluetooth_jni.s
 system/vendor `libbluetooth.so`, Qualcomm `libbluetooth_qti.so`, `system_ext`-based
 QTI variant, or the older split-stack `libbluetooth_jni.so`/`libbluetooth_qti_jni.so`
 — see below) and replaces it with a matching shim via a bind-mount overlay. The shim
-loads the original library alongside itself and installs two inline trampoline hooks:
+loads the original library alongside itself and installs three inline trampoline hooks:
 
 | Hook | Target function | Effect |
 |------|----------------|--------|
 | 1 | `btsnd_hcic_write_dev_class` | Forces CoD to `0x002508` on every HCI write |
 | 2 | `btm_set_bond_type_dev` | Upgrades temporary bonds to persistent |
+| 3 | `btm_pm_proc_mode_change` | Observational only — publishes the current BT link power mode (Active/Sniff/Hold/Park) to `/dev/btlinkmode` |
 
-Both functions are located by pattern-scanning the executable segment of the
-loaded library — no hardcoded offsets, no debug symbols required.
+All three functions are located by pattern-scanning the executable segment of
+the loaded library — no hardcoded offsets, no debug symbols required.
 
 Some vendor Bluetooth stacks restructure the code enough that the generic
-Hook 2 scan finds nothing (confirmed on Samsung's Android 16 "Gabeldorsche"
-stack, e.g. Galaxy Z Fold SM-F946B). For those, the module tries a second,
-still scan-based strategy that looks for the target function's own
-instruction shape instead of anchoring on its (in this case unrecognizable)
-caller — see `src/bond_setter_scan.c`.
+Hook 2 (and, on the same builds, Hook 3) scan finds nothing (confirmed on
+Samsung's Android 16 "Gabeldorsche" stack, e.g. Galaxy Z Fold SM-F946B, for
+Hook 2; Samsung's A05 stack for Hook 3). For those, the module tries a
+second, still scan-based strategy that looks for the target function's own
+instruction shape instead of anchoring on its (in this case unrecognizable
+or already-pre-parsed) caller — see `src/bond_setter_scan.c` and
+`src/mode_change_shape_scan.c`.
 
 On some (typically older, pre-mainline-APEX) BT stacks, `JNI_OnLoad` lives in
 a separate, thin wrapper library from the one containing the CoD/Bond target
@@ -62,7 +65,10 @@ up.
 A separate JNI library (`libjoycondroid_jni.so`) is deployed into the Joy-Con Droid
 app directory. It provides `getBluetoothAddressNative`, which reads the host Bluetooth
 MAC address from `/dev/btaddr` — a value otherwise unavailable to non-system apps on
-Android 10+ due to the `LOCAL_MAC_ADDRESS` permission requirement.
+Android 10+ due to the `LOCAL_MAC_ADDRESS` permission requirement — and
+`getBluetoothLinkModeNative`, which reads the current link power mode from
+`/dev/btlinkmode` (written by Hook 3) so Joy-Con Droid can avoid sending HID
+reports while the link is mid-negotiation of a Sniff Mode transition.
 
 ### Runtime Resource Overlay (RRO)
 
@@ -162,6 +168,7 @@ jcdshim  I  JNI_OnLoad: orig lib = libbluetooth_jni_orig.so
 jcdshim  I  patch_fn: hooked 0x...    ← Hook 1 (CoD slot 0) installed
 jcdshim  I  patch_fn: hooked 0x...    ← Hook 1 (CoD slot 1, Samsung only)
 jcdshim  I  patch_fn: hooked 0x...    ← Hook 2 installed
+jcdshim  I  patch_fn: hooked 0x...    ← Hook 3 (Mode-Change) installed
 jcdshim  I  JNI_OnLoad: done
 ```
 
@@ -174,6 +181,7 @@ Expected during pairing with Switch 2:
 jcdshim  I  hook_cod[0]: CoD=0x180508 -> forcing 0x002508
 jcdshim  I  hook_bond_type: bond_type=2
 jcdshim  I  hook_bond_type: TEMPORARY -> PERSISTENT
+jcdshim  I  hook_mode_change: status=0x00 handle=0x000b mode=Sniff(2) interval=24
 ```
 
 ## Debugging
@@ -196,6 +204,7 @@ jcdshim  I  JNI_OnLoad: shim loaded
 jcdshim  I  JNI_OnLoad: orig lib = libbluetooth_jni_orig.so
 jcdshim  I  patch_fn: hooked 0x...    ← Hook 1 (CoD) installed
 jcdshim  I  patch_fn: hooked 0x...    ← Hook 2 (Bond) installed
+jcdshim  I  patch_fn: hooked 0x...    ← Hook 3 (Mode-Change) installed
 jcdshim  I  JNI_OnLoad: done
 jcdshim  I  hook_cod[0]: CoD=0x... -> forcing 0x002508
 jcdshim  I  write_bt_addr: wrote XX:XX:XX:XX:XX:XX to /dev/btaddr
@@ -248,6 +257,7 @@ For each library the script reports the function address found, the
   Hook 2 (Bond): fn=0x00830f14  bond_type_ptr=0x00c54658  offs=264/265/266  ✅
              first 4 insns: 0xf800865e 0xa9bd7bfd 0xf9000bf5 0xa9024ff4
              prologue: SCS_SAVE (standard)
+  Hook 3 (Mode-Change): fn=0x0081c9cc  ✅
 ```
 
 Samsung devices ship multiple functions that send Write\_Class\_of\_Device.
@@ -282,10 +292,13 @@ as a pre-flash check for new firmware images. Use `scripts/pull.sh` (Linux/macOS
 or `scripts/pull.ps1` (Windows) to pull a library from a connected device first.
 
 If the generic Hook 2 scan finds nothing but the setter-shape scan (see
-above) matches, the script reports that instead of a plain failure:
+above) matches, the script reports that instead of a plain failure — and
+likewise for Hook 3's shape-scan fallback (confirmed needed on both Samsung
+A05 libraries, whose caller doesn't unpack the raw event bytes locally):
 
 ```
   Hook 2 (Bond): generic scanner found nothing, but setter-shape scan  ✅  (bond_setter_scan.c, fn=0x008ed088)
+  Hook 3 (Mode-Change): generic scanner found nothing, but shape scan  ✅  (mode_change_shape_scan.c, fn=0x00a30160)
 ```
 
 ## Filing a Bug Report

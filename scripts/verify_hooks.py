@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-verify_hooks.py — Static scanner for Hook 1 (CoD) and Hook 2 (Bond) patterns.
+verify_hooks.py — Static scanner for Hook 1 (CoD), Hook 2 (Bond) and
+Hook 3 (Mode-Change) patterns.
 
 Usage:
     python3 scripts/verify_hooks.py <libbluetooth*.so> [...]
@@ -304,6 +305,182 @@ def find_bond_fn(ws, vaddr, exec_sz):
 
     return None, None, None
 
+# ── Hook 3: btm_pm_proc_mode_change (Mode-Change) ───────────────────────────
+#
+# Observational hook — publishes the current BT link power mode to
+# /dev/btlinkmode, never alters behavior. Mirrors src/mode_change.c
+# (strategy 1: caller byte-unpack fingerprint) and
+# src/mode_change_shape_scan.c (strategy 2: callee shape scan).
+
+BTI_C_INSN = 0xd503245f
+
+# Strategy 1: LDRB/LDURH/LDRH loads at fixed offsets 0/1/3/4 from the same
+# base register — the raw 6-byte HCI Mode Change event being unpacked by the
+# caller (Status@0, Connection_Handle@1-2, Current_Mode@3, Interval@4-5).
+LDRB_OFF0_MASK  = 0xFFFFFC00
+LDRB_OFF0_VAL   = 0x39400000   # LDRB  Wt,[Xn,#0]  (status)
+LDURH_OFF1_MASK = 0xFFFFFC00
+LDURH_OFF1_VAL  = 0x78401000   # LDURH Wt,[Xn,#1]  (handle)
+LDRH_OFF4_MASK  = 0xFFFFFC00
+LDRH_OFF4_VAL   = 0x79400800   # LDRH  Wt,[Xn,#4]  (interval)
+LDRB_OFF3_MASK  = 0xFFFFFC00
+LDRB_OFF3_VAL   = 0x39400c00   # LDRB  Wt,[Xn,#3]  (mode)
+
+MOV_REG_MASK = 0xFFE0FFE0      # MOV Wd,Wm (ORR Wd,WZR,Wm alias)
+MOV_REG_VAL  = 0x2A0003E0
+
+UNPACK_SCAN_WINDOW = 8
+SIM_FORWARD_MAX    = 64
+
+F_NONE, F_STATUS, F_HANDLE, F_MODE, F_INTERVAL = range(5)
+
+def _mc_target_has_scs_prologue(ws, idx, n):
+    if idx < 0 or idx + 1 >= n:
+        return False
+    if ws[idx] == SCS_SAVE_INSN:
+        return True
+    if ws[idx] == BTI_C_INSN and ws[idx + 1] == SCS_SAVE_INSN:
+        return True
+    return False
+
+def _mc_simulate_to_call(ws, start, n, r_status, r_handle, r_mode, r_interval):
+    holds = [F_NONE] * 32
+    holds[r_status], holds[r_handle] = F_STATUS, F_HANDLE
+    holds[r_mode], holds[r_interval] = F_MODE, F_INTERVAL
+
+    win_hi = min(start + SIM_FORWARD_MAX, n)
+    for q in range(start, win_hi):
+        w = ws[q]
+        if (w & MOV_REG_MASK) == MOV_REG_VAL:
+            rd, rm = w & 0x1F, (w >> 16) & 0x1F
+            holds[rd] = holds[rm]
+            continue
+        is_bl = (w & BL_MASK) == BL_VAL
+        is_b  = (w & 0xFC000000) == 0x14000000
+        if is_bl or is_b:
+            if holds[0] == F_STATUS and holds[1] == F_HANDLE and \
+               holds[2] == F_MODE and holds[3] == F_INTERVAL:
+                imm26 = w & 0x03FFFFFF
+                if imm26 & (1 << 25):
+                    imm26 -= (1 << 26)
+                tgt_idx = q + imm26
+                if _mc_target_has_scs_prologue(ws, tgt_idx, n):
+                    return tgt_idx
+            if is_b:
+                break
+            holds[0] = holds[1] = holds[2] = holds[3] = F_NONE
+            continue
+        rd_generic = w & 0x1F
+        if rd_generic < 4 and holds[rd_generic] != F_NONE:
+            holds[rd_generic] = F_NONE
+    return None
+
+def find_mode_change_fn(ws, vaddr):
+    n = len(ws)
+    match = None
+    n_matches = 0
+
+    for p in range(n - UNPACK_SCAN_WINDOW):
+        win_hi = p + UNPACK_SCAN_WINDOW
+        i_status = i_handle = i_mode = i_interval = None
+        for q in range(p, win_hi):
+            w = ws[q]
+            if i_status is None and (w & LDRB_OFF0_MASK) == LDRB_OFF0_VAL: i_status = q
+            if i_handle is None and (w & LDURH_OFF1_MASK) == LDURH_OFF1_VAL: i_handle = q
+            if i_mode is None and (w & LDRB_OFF3_MASK) == LDRB_OFF3_VAL: i_mode = q
+            if i_interval is None and (w & LDRH_OFF4_MASK) == LDRH_OFF4_VAL: i_interval = q
+        if None in (i_status, i_handle, i_mode, i_interval):
+            continue
+
+        rn = lambda idx: (ws[idx] >> 5) & 0x1F
+        if not (rn(i_status) == rn(i_handle) == rn(i_mode) == rn(i_interval)):
+            continue
+
+        rt = lambda idx: ws[idx] & 0x1F
+        r_status, r_handle, r_mode, r_interval = rt(i_status), rt(i_handle), rt(i_mode), rt(i_interval)
+        if len({r_status, r_handle, r_mode, r_interval}) != 4:
+            continue
+
+        last = max(i_status, i_handle, i_mode, i_interval)
+        tgt_idx = _mc_simulate_to_call(ws, last + 1, n, r_status, r_handle, r_mode, r_interval)
+        if tgt_idx is None:
+            continue
+
+        if match is None:
+            match, n_matches = tgt_idx, 1
+        elif tgt_idx != match:
+            n_matches += 1
+
+    if n_matches != 1:
+        return None
+    return vaddr + match * 4
+
+# Strategy 2: whole-binary scan for btm_pm_proc_mode_change's own shape —
+# SCS_SAVE(+BTI) prologue, then AND X1,#0xffff + STRH W1,[SP,#imm] (masks and
+# stashes the handle arg) bracketed by an ADRP+LDR pair before it and a CBZ
+# after it (a global-lookup-and-bail idiom every verified instance has).
+
+AND_X1_FFFF_MASK = 0xFFFFFFE0
+AND_X1_FFFF_VAL  = 0x92403C20
+STRH_W1_SP_MASK  = 0xFFC003FF
+STRH_W1_SP_VAL   = 0x790003E1
+LDR_X_IMM_MASK   = 0xFFC00000
+LDR_X_IMM_VAL    = 0xF9400000
+CBZ_X_MASK       = 0xFF000000
+CBZ_X_VAL        = 0xB4000000
+
+SHAPE_SCAN_WINDOW = 18
+AND_STRH_MAX_GAP  = 3
+ADRP_LOOKBACK     = 4
+CBZ_LOOKAHEAD     = 4
+
+def find_mode_change_fn_by_shape(ws, vaddr):
+    n = len(ws)
+    match = None
+    n_matches = 0
+
+    for p in range(n):
+        if ws[p] == SCS_SAVE_INSN:
+            prologue = p
+        elif ws[p] == BTI_C_INSN and p + 1 < n and ws[p + 1] == SCS_SAVE_INSN:
+            prologue = p + 1
+        else:
+            continue
+
+        win_hi = min(prologue + SHAPE_SCAN_WINDOW, n)
+        and_idx = strh_idx = None
+        for q in range(prologue, win_hi):
+            if and_idx is None and (ws[q] & AND_X1_FFFF_MASK) == AND_X1_FFFF_VAL:
+                and_idx = q
+            if strh_idx is None and (ws[q] & STRH_W1_SP_MASK) == STRH_W1_SP_VAL:
+                strh_idx = q
+        if and_idx is None or strh_idx is None:
+            continue
+        if not (0 <= strh_idx - and_idx <= AND_STRH_MAX_GAP):
+            continue
+
+        adrp_lo = max(0, and_idx - ADRP_LOOKBACK)
+        has_adrp_ldr = any(
+            (ws[a] & ADRP_MASK) == ADRP_VAL and (ws[a + 1] & LDR_X_IMM_MASK) == LDR_X_IMM_VAL
+            for a in range(adrp_lo, and_idx)
+        )
+        if not has_adrp_ldr:
+            continue
+
+        cbz_hi = min(strh_idx + 1 + CBZ_LOOKAHEAD, n)
+        has_cbz = any((ws[c] & CBZ_X_MASK) == CBZ_X_VAL for c in range(strh_idx, cbz_hi))
+        if not has_cbz:
+            continue
+
+        if match is None:
+            match, n_matches = prologue, 1
+        elif prologue != match:
+            n_matches += 1
+
+    if n_matches != 1:
+        return None
+    return vaddr + match * 4
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def verify(path):
@@ -360,6 +537,17 @@ def verify(path):
               f"  ✅  (bond_setter_scan.c, fn=0x{setter_va:08x})")
     else:
         print(f"  Hook 2 (Bond): NOT FOUND  ❌")
+        ok = False
+
+    # Hook 3
+    mc_va = find_mode_change_fn(ws, vaddr)
+    if mc_va is not None:
+        print(f"  Hook 3 (Mode-Change): fn=0x{mc_va:08x}  ✅")
+    elif (mc_shape_va := find_mode_change_fn_by_shape(ws, vaddr)) is not None:
+        print(f"  Hook 3 (Mode-Change): generic scanner found nothing, but shape scan"
+              f"  ✅  (mode_change_shape_scan.c, fn=0x{mc_shape_va:08x})")
+    else:
+        print(f"  Hook 3 (Mode-Change): NOT FOUND  ❌")
         ok = False
 
     return ok

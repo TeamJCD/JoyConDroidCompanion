@@ -32,12 +32,18 @@ setup_overlay() {
     mount --bind "$OVERLAY" "$LIB_DIR"
 }
 
-# Pre-create /dev/btaddr so the BT shim (bluetooth domain) can write to it.
-# Needs to exist before BT starts; post-fs-data.sh runs as root before any service.
+# Pre-create /dev/btaddr and /dev/btlinkmode so the BT shim (bluetooth domain)
+# can write to them. Need to exist before BT starts; post-fs-data.sh runs as
+# root before any service.
 touch /dev/btaddr
 chown bluetooth:bluetooth /dev/btaddr
 chmod 0644 /dev/btaddr
 chcon u:object_r:bluetooth_data_file:s0 /dev/btaddr
+
+touch /dev/btlinkmode
+chown bluetooth:bluetooth /dev/btlinkmode
+chmod 0644 /dev/btlinkmode
+chcon u:object_r:bluetooth_data_file:s0 /dev/btlinkmode
 
 APEX_LIB=/apex/com.android.btservices/lib64
 APEX_LIB_LEGACY=/apex/com.android.bt/lib64

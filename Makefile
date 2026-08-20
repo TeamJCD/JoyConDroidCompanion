@@ -28,7 +28,8 @@ PATCHER = $(BUILD)/patch_sym
 ZIP     = $(BUILD)/JoyConDroidCompanion.zip
 
 # --- Shim -----------------------------------------------------------------
-SHIM_SRCS = src/shim.c src/cod.c src/bond.c src/bond_setter_scan.c src/btaddr.c
+SHIM_SRCS = src/shim.c src/cod.c src/bond.c src/bond_setter_scan.c src/btaddr.c \
+            src/mode_change.c src/mode_change_shape_scan.c
 # One variant per BT library (APEX / pre-APEX / QTI / QTI split-stack).
 SHIMS     = $(BUILD)/libbluetooth_jni_shim.so \
             $(BUILD)/libbluetooth_shim.so \

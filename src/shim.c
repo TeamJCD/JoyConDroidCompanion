@@ -5,9 +5,11 @@
  * DT_NEEDED: libbluetooth_jni_orig.so (SONAME patched to .sx) loads the real
  * 13 MB library alongside and provides libc symbols transitively.
  *
- * Two inline trampoline hooks (see cod.c, bond.c):
- *   cod.c  — btsnd_hcic_write_dev_class   forces CoD to 0x002508
- *   bond.c — btm_set_bond_type_dev        forces BOND_TYPE_PERSISTENT
+ * Three inline trampoline hooks (see cod.c, bond.c, mode_change.c):
+ *   cod.c         — btsnd_hcic_write_dev_class  forces CoD to 0x002508
+ *   bond.c        — btm_set_bond_type_dev       forces BOND_TYPE_PERSISTENT
+ *   mode_change.c — btm_pm_proc_mode_change     observes link mode, publishes
+ *                   to /dev/btlinkmode (never alters behavior)
  *
  * SELinux requirements (sepolicy.rule):
  *   allow bluetooth self:process execmem
@@ -359,24 +361,28 @@ static const char *find_orig_lib(void)
 }
 
 /*
- * Attempts CoD + Bond hooks, scanning orig_lib first (the common case where
- * it contains the real stack code) and falling back to each other known
- * vendor lib SONAME — still mapped in the process but not itself matched
- * above — if orig_lib turns out to be a thin JNI-only wrapper. Only touches
- * whichever of n_cod/n_bond is still 0, so it is safe to call repeatedly:
- * once a hook is installed, the patched bytes no longer match the scanner's
- * pattern, and callers stop invoking the corresponding install_*_hook once
- * its counter is nonzero.
+ * Attempts CoD + Bond + Mode-Change hooks, scanning orig_lib first (the
+ * common case where it contains the real stack code) and falling back to
+ * each other known vendor lib SONAME — still mapped in the process but not
+ * itself matched above — if orig_lib turns out to be a thin JNI-only
+ * wrapper. Only touches whichever of n_cod/n_bond/n_mode is still 0, so it
+ * is safe to call repeatedly: once a hook is installed, the patched bytes no
+ * longer match the scanner's pattern, and callers stop invoking the
+ * corresponding install_*_hook once its counter is nonzero.
  */
-static void try_install_hooks(const char *orig_lib, int *n_cod, int *n_bond)
+static void try_install_hooks(const char *orig_lib, int *n_cod, int *n_bond, int *n_mode)
 {
     if (!*n_cod)  *n_cod  = install_cod_hook(orig_lib);
     if (!*n_bond) {
         *n_bond = install_bond_hook(orig_lib);
         if (!*n_bond) *n_bond = install_bond_hook_setter_scan(orig_lib);
     }
+    if (!*n_mode) {
+        *n_mode = install_mode_change_hook(orig_lib);
+        if (!*n_mode) *n_mode = install_mode_change_hook_shape_scan(orig_lib);
+    }
 
-    for (int i = 0; PLAIN_LIB_CANDIDATES[i] && (!*n_cod || !*n_bond); i++) {
+    for (int i = 0; PLAIN_LIB_CANDIDATES[i] && (!*n_cod || !*n_bond || !*n_mode); i++) {
         const char *lib = PLAIN_LIB_CANDIDATES[i];
         if (!*n_cod) {
             *n_cod = install_cod_hook(lib);
@@ -386,6 +392,11 @@ static void try_install_hooks(const char *orig_lib, int *n_cod, int *n_bond)
             *n_bond = install_bond_hook(lib);
             if (!*n_bond) *n_bond = install_bond_hook_setter_scan(lib);
             if (*n_bond) LOGI("install_hooks: Bond target found in fallback lib %s", lib);
+        }
+        if (!*n_mode) {
+            *n_mode = install_mode_change_hook(lib);
+            if (!*n_mode) *n_mode = install_mode_change_hook_shape_scan(lib);
+            if (*n_mode) LOGI("install_hooks: Mode-Change target found in fallback lib %s", lib);
         }
     }
 }
@@ -406,38 +417,41 @@ typedef struct {
     const char *orig_lib;
     int n_cod;
     int n_bond;
+    int n_mode;
 } hook_retry_ctx_t;
 
 static void *hook_retry_thread(void *arg)
 {
     hook_retry_ctx_t *ctx = (hook_retry_ctx_t *)arg;
     for (int attempt = 1;
-         attempt <= HOOK_RETRY_MAX_ATTEMPTS && (!ctx->n_cod || !ctx->n_bond);
+         attempt <= HOOK_RETRY_MAX_ATTEMPTS && (!ctx->n_cod || !ctx->n_bond || !ctx->n_mode);
          attempt++) {
         usleep(HOOK_RETRY_INTERVAL_US);
-        try_install_hooks(ctx->orig_lib, &ctx->n_cod, &ctx->n_bond);
+        try_install_hooks(ctx->orig_lib, &ctx->n_cod, &ctx->n_bond, &ctx->n_mode);
     }
     if (!ctx->n_cod)  LOGE("install_hooks: CoD target not found after retry — giving up");
     if (!ctx->n_bond) LOGE("install_hooks: Bond target not found after retry — giving up");
+    if (!ctx->n_mode) LOGE("install_hooks: Mode-Change target not found after retry — giving up");
     free(ctx);
     return NULL;
 }
 
 static void install_hooks(const char *orig_lib)
 {
-    int n_cod = 0, n_bond = 0;
-    try_install_hooks(orig_lib, &n_cod, &n_bond);
+    int n_cod = 0, n_bond = 0, n_mode = 0;
+    try_install_hooks(orig_lib, &n_cod, &n_bond, &n_mode);
 
-    if (n_cod && n_bond) return;
+    if (n_cod && n_bond && n_mode) return;
 
-    LOGI("install_hooks: target(s) not yet mapped (cod=%d bond=%d), retrying in background",
-         n_cod, n_bond);
+    LOGI("install_hooks: target(s) not yet mapped (cod=%d bond=%d mode=%d), retrying in background",
+         n_cod, n_bond, n_mode);
 
     hook_retry_ctx_t *ctx = malloc(sizeof(*ctx));
     if (!ctx) { LOGE("install_hooks: malloc failed"); return; }
     ctx->orig_lib = orig_lib;
     ctx->n_cod = n_cod;
     ctx->n_bond = n_bond;
+    ctx->n_mode = n_mode;
 
     pthread_t t;
     if (pthread_create(&t, NULL, hook_retry_thread, ctx) != 0) {
