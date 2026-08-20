@@ -13,6 +13,10 @@
  * CoD 0x002508 in packed form (as passed to the function):
  *   dev_class[0]=0x08 (low), dev_class[1]=0x25, dev_class[2]=0x00 (high)
  *   arg = (0x08<<16)|(0x25<<8)|0x00 = 0x082500
+ *
+ * Some Qualcomm QTI stacks (Xiaomi 2210132C, "nuwa") use a different calling
+ * convention for the same HCI command: x0 is a *pointer* to a 3-byte
+ * dev_class array, not a packed raw value.  See cod_fn_takes_ptr_arg().
  */
 
 #include "shim.h"
@@ -21,11 +25,28 @@
 #define MOVZ_HCI_COD_MASK  0xFFFFFFE0u
 #define MOVZ_HCI_COD_VAL   0x52818480u
 
+/* ldrb wT, [Xn, #imm12]  (unsigned-offset byte load) */
+#define LDRB_IMM_MASK 0xFFC00000u
+#define LDRB_IMM_VAL  0x39400000u
+
 #define MAX_COD_HOOKS 4
+#define MAX_COD_PTR_HOOKS 2
+#define COD_PTR_SCAN_WINDOW 200
 
 typedef void (*cod_fn_t)(uint32_t);
+typedef void (*cod_ptr_fn_t)(const uint8_t *);
 
-static cod_fn_t g_orig_stubs[MAX_COD_HOOKS];
+static cod_fn_t     g_orig_stubs[MAX_COD_HOOKS];
+static cod_ptr_fn_t g_orig_ptr_stubs[MAX_COD_PTR_HOOKS];
+
+/*
+ * Wire-order fix value for the pointer calling convention.  Derived from the
+ * QTI disassembly: the function copies array[2],array[1],array[0] (in that
+ * order) into the outgoing HCI parameter bytes, i.e. array[0] ends up as the
+ * CoD's MSB and array[2] as its LSB — reversed vs. the AOSP dev_class[]
+ * convention (dev_class[0] = LSB) documented above.
+ */
+static const uint8_t g_cod_ptr_fix[3] = { 0x00, 0x25, 0x08 };
 
 static void cod_hook_impl(uint32_t cod, int idx)
 {
@@ -43,6 +64,24 @@ static void hook_cod_3(uint32_t cod) { cod_hook_impl(cod, 3); }
 
 static cod_fn_t const g_hook_fns[MAX_COD_HOOKS] = {
     hook_cod_0, hook_cod_1, hook_cod_2, hook_cod_3
+};
+
+static void cod_hook_ptr_impl(const uint8_t *cod, int idx)
+{
+    if (cod) {
+        LOGI("hook_cod_ptr[%d]: CoD=0x%02x%02x%02x -> forcing 0x002508",
+             idx, cod[0], cod[1], cod[2]);
+    }
+    if (g_orig_ptr_stubs[idx])
+        g_orig_ptr_stubs[idx](g_cod_ptr_fix);
+    on_stack_ready();
+}
+
+static void hook_cod_ptr_0(const uint8_t *cod) { cod_hook_ptr_impl(cod, 0); }
+static void hook_cod_ptr_1(const uint8_t *cod) { cod_hook_ptr_impl(cod, 1); }
+
+static cod_ptr_fn_t const g_hook_ptr_fns[MAX_COD_PTR_HOOKS] = {
+    hook_cod_ptr_0, hook_cod_ptr_1
 };
 
 /*
@@ -67,6 +106,34 @@ static int cod_fn_takes_raw_value(uint32_t *fn_start, uint32_t *movz_pos)
     return 1;
 }
 
+/*
+ * Detects the pointer calling convention (see file header): three LDRB loads
+ * from the *same* base register at byte offsets 0, 1 and 2 (in any order)
+ * within the function body.  This is the array-unpacking loop QTI's variant
+ * uses instead of bit-shifting a packed value.  Scan is bounded to the next
+ * SCS_SAVE prologue (i.e. this function only) or COD_PTR_SCAN_WINDOW words,
+ * whichever comes first.
+ */
+static int cod_fn_takes_ptr_arg(uint32_t *fn_start, uint32_t *exec_end)
+{
+    uint32_t *fn_end = fn_start + COD_PTR_SCAN_WINDOW;
+    if (fn_end > exec_end) fn_end = exec_end;
+    for (uint32_t *q = fn_start + 1; q < fn_end; q++) {
+        if (*q == SCS_SAVE_INSN) { fn_end = q; break; }
+    }
+
+    uint8_t offset_mask[32] = {0};
+    for (uint32_t *p = fn_start; p < fn_end; p++) {
+        if ((*p & LDRB_IMM_MASK) != LDRB_IMM_VAL) continue;
+        uint32_t rn  = (*p >> 5) & 0x1Fu;
+        uint32_t imm = (*p >> 10) & 0xFFFu;
+        if (imm > 2 || rn == 31) continue;
+        offset_mask[rn] |= (uint8_t)(1u << imm);
+        if (offset_mask[rn] == 0x7u) return 1;
+    }
+    return 0;
+}
+
 int install_cod_hook(const char *libname)
 {
     size_t exec_size = 0;
@@ -74,10 +141,10 @@ int install_cod_hook(const char *libname)
     if (!exec) return 0;
     uint32_t *end = exec + exec_size / 4;
 
-    int n_installed = 0;
-    uint8_t *seen_fns[MAX_COD_HOOKS] = {NULL};
+    int n_raw = 0, n_ptr = 0, n_seen = 0;
+    uint8_t *seen_fns[MAX_COD_HOOKS + MAX_COD_PTR_HOOKS] = {NULL};
 
-    for (uint32_t *p = exec; p < end && n_installed < MAX_COD_HOOKS; p++) {
+    for (uint32_t *p = exec; p < end && (n_raw + n_ptr) < (MAX_COD_HOOKS + MAX_COD_PTR_HOOKS); p++) {
         if ((*p & MOVZ_HCI_COD_MASK) != MOVZ_HCI_COD_VAL)
             continue;
 
@@ -93,10 +160,21 @@ int install_cod_hook(const char *libname)
 
         /* Skip if this function was already hooked (multiple MOVZ in one fn). */
         int dup = 0;
-        for (int i = 0; i < n_installed; i++) {
+        for (int i = 0; i < n_seen; i++) {
             if (seen_fns[i] == fn) { dup = 1; break; }
         }
         if (dup) continue;
+
+        if (cod_fn_takes_ptr_arg((uint32_t *)fn, end)) {
+            if (n_ptr >= MAX_COD_PTR_HOOKS) continue;
+            seen_fns[n_seen++] = fn;
+            LOGI("find_cod: fn=%p (+%u bytes to MOVZ) [pointer-arg variant]", fn,
+                 (unsigned)((p - (uint32_t *)fn) * 4));
+            install_hook(fn, (void *)g_hook_ptr_fns[n_ptr],
+                         (void **)&g_orig_ptr_stubs[n_ptr]);
+            n_ptr++;
+            continue;
+        }
 
         /*
          * Skip functions that treat x0 as a structure pointer rather than a
@@ -109,18 +187,21 @@ int install_cod_hook(const char *libname)
             continue;
         }
 
-        seen_fns[n_installed] = fn;
+        if (n_raw >= MAX_COD_HOOKS) continue;
+        seen_fns[n_seen++] = fn;
         LOGI("find_cod: fn=%p (+%u bytes to MOVZ)", fn,
              (unsigned)((p - (uint32_t *)fn) * 4));
 
-        install_hook(fn, (void *)g_hook_fns[n_installed],
-                     (void **)&g_orig_stubs[n_installed]);
-        n_installed++;
+        install_hook(fn, (void *)g_hook_fns[n_raw],
+                     (void **)&g_orig_stubs[n_raw]);
+        n_raw++;
     }
 
+    int n_installed = n_raw + n_ptr;
     if (n_installed == 0)
         LOGE("install_cod_hook: btsnd_hcic_write_dev_class not found — CoD fix disabled");
     else
-        LOGI("install_cod_hook: %d hook(s) installed", n_installed);
+        LOGI("install_cod_hook: %d hook(s) installed (%d raw, %d pointer)",
+             n_installed, n_raw, n_ptr);
     return n_installed;
 }

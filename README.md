@@ -267,6 +267,16 @@ pointer instead of a raw CoD value are skipped automatically (`⏭`):
              prologue: ADRP x8 (Samsung-style early-exit preamble)
 ```
 
+Some Qualcomm QTI stacks (e.g. Xiaomi 2210132C) use a different calling
+convention for the same HCI write: `x0` is a pointer to a 3-byte
+`dev_class` array rather than a packed value. This is detected separately
+from the structure-pointer skip above and hooked with a dedicated variant
+that writes through the pointer instead:
+
+```
+  Hook 1 (CoD):  fn=0x005e97c0  (+36 bytes to MOVZ)  ✅  (pointer-arg variant, slot 0)
+```
+
 The script exits non-zero if any library yields no match, making it suitable
 as a pre-flash check for new firmware images. Use `scripts/pull.sh` (Linux/macOS)
 or `scripts/pull.ps1` (Windows) to pull a library from a connected device first.

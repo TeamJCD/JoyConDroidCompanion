@@ -42,11 +42,21 @@ def parse_exec_segment(path):
 # Samsung ships up to 3 independent functions with this pattern; all are
 # hooked at runtime (MAX_COD_HOOKS=4).  The scanner returns every unique
 # function found so the caller can report / validate all of them.
+#
+# Some Qualcomm QTI stacks (Xiaomi 2210132C, "nuwa") use a different calling
+# convention: x0 is a pointer to a 3-byte dev_class array rather than a
+# packed raw value.  Fingerprint: three LDRB loads from the same base
+# register at byte offsets 0/1/2 (the array-unpacking loop) — see
+# cod_fn_takes_ptr_arg() in src/cod.c for the runtime-identical check.
 
-MOVZ_HCI_COD_MASK = 0xFFFFFFE0
-MOVZ_HCI_COD_VAL  = 0x52818480
-SCS_SAVE_INSN     = 0xf800865e
-MAX_COD_HOOKS     = 4
+MOVZ_HCI_COD_MASK   = 0xFFFFFFE0
+MOVZ_HCI_COD_VAL    = 0x52818480
+SCS_SAVE_INSN       = 0xf800865e
+MAX_COD_HOOKS       = 4
+MAX_COD_PTR_HOOKS   = 2
+COD_PTR_SCAN_WINDOW = 200
+LDRB_IMM_MASK       = 0xFFC00000
+LDRB_IMM_VAL        = 0x39400000
 
 def _cod_fn_takes_raw_value(ws, fn_idx, movz_idx):
     """
@@ -64,8 +74,30 @@ def _cod_fn_takes_raw_value(ws, fn_idx, movz_idx):
                 return False
     return True
 
+def _cod_fn_takes_ptr_arg(ws, fn_idx):
+    """Return True if x0 is a pointer to a 3-byte dev_class array (QTI variant)."""
+    n = len(ws)
+    fn_end = min(fn_idx + COD_PTR_SCAN_WINDOW, n)
+    for q in range(fn_idx + 1, fn_end):
+        if ws[q] == SCS_SAVE_INSN:
+            fn_end = q
+            break
+    offset_mask = [0] * 32
+    for p in range(fn_idx, fn_end):
+        if (ws[p] & LDRB_IMM_MASK) != LDRB_IMM_VAL:
+            continue
+        rn  = (ws[p] >> 5) & 0x1F
+        imm = (ws[p] >> 10) & 0xFFF
+        if imm > 2 or rn == 31:
+            continue
+        offset_mask[rn] |= (1 << imm)
+        if offset_mask[rn] == 0x7:
+            return True
+    return False
+
 def find_cod_fns(ws, vaddr):
-    """Return list of (fn_va, distance_in_words, hookable) for all CoD-hook candidates."""
+    """Return list of (fn_va, distance_in_words, kind) for all CoD-hook candidates.
+    kind is one of 'raw', 'ptr', 'skip'."""
     n = len(ws)
     results = []
     seen = set()
@@ -77,8 +109,13 @@ def find_cod_fns(ws, vaddr):
                 fn_va = vaddr + j * 4
                 if fn_va not in seen:
                     seen.add(fn_va)
-                    hookable = _cod_fn_takes_raw_value(ws, j, i)
-                    results.append((fn_va, i - j, hookable))
+                    if _cod_fn_takes_ptr_arg(ws, j):
+                        kind = "ptr"
+                    elif _cod_fn_takes_raw_value(ws, j, i):
+                        kind = "raw"
+                    else:
+                        kind = "skip"
+                    results.append((fn_va, i - j, kind))
                 break
     return results
 
@@ -286,17 +323,22 @@ def verify(path):
 
     # Hook 1 — may match multiple functions on Samsung
     cod_fns = find_cod_fns(ws, vaddr)
-    hookable = [(va, d) for va, d, h in cod_fns if h]
-    skipped  = [(va, d) for va, d, h in cod_fns if not h]
-    if hookable:
-        for idx, (fn_va, dist) in enumerate(hookable):
+    raw     = [(va, d) for va, d, k in cod_fns if k == "raw"]
+    ptr     = [(va, d) for va, d, k in cod_fns if k == "ptr"]
+    skipped = [(va, d) for va, d, k in cod_fns if k == "skip"]
+    if raw or ptr:
+        for idx, (fn_va, dist) in enumerate(raw):
             tag = "✅" if idx == 0 else "  "
             suffix = f"  (slot {idx})" if idx > 0 else ""
             print(f"  Hook 1 (CoD):  fn=0x{fn_va:08x}  (+{dist * 4} bytes to MOVZ)  {tag}{suffix}")
+        for idx, (fn_va, dist) in enumerate(ptr):
+            print(f"  Hook 1 (CoD):  fn=0x{fn_va:08x}  (+{dist * 4} bytes to MOVZ)  ✅  (pointer-arg variant, slot {idx})")
         for fn_va, dist in skipped:
             print(f"  Hook 1 (CoD):  fn=0x{fn_va:08x}  (+{dist * 4} bytes to MOVZ)  ⏭  (x0=pointer, skipped)")
-        if len(hookable) > MAX_COD_HOOKS:
-            print(f"  Hook 1 (CoD):  WARNING: {len(hookable)} hookable > MAX_COD_HOOKS={MAX_COD_HOOKS}, excess will be skipped")
+        if len(raw) > MAX_COD_HOOKS:
+            print(f"  Hook 1 (CoD):  WARNING: {len(raw)} raw hookable > MAX_COD_HOOKS={MAX_COD_HOOKS}, excess will be skipped")
+        if len(ptr) > MAX_COD_PTR_HOOKS:
+            print(f"  Hook 1 (CoD):  WARNING: {len(ptr)} pointer-arg hookable > MAX_COD_PTR_HOOKS={MAX_COD_PTR_HOOKS}, excess will be skipped")
     else:
         print(f"  Hook 1 (CoD):  NOT FOUND  ❌")
         ok = False
