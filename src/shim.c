@@ -25,6 +25,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#include <pthread.h>
 
 /* ── ELF helpers ── */
 
@@ -358,32 +359,93 @@ static const char *find_orig_lib(void)
 }
 
 /*
- * Installs CoD + Bond hooks, scanning orig_lib first (the common case where
+ * Attempts CoD + Bond hooks, scanning orig_lib first (the common case where
  * it contains the real stack code) and falling back to each other known
  * vendor lib SONAME — still mapped in the process but not itself matched
- * above — if orig_lib turns out to be a thin JNI-only wrapper.
+ * above — if orig_lib turns out to be a thin JNI-only wrapper. Only touches
+ * whichever of n_cod/n_bond is still 0, so it is safe to call repeatedly:
+ * once a hook is installed, the patched bytes no longer match the scanner's
+ * pattern, and callers stop invoking the corresponding install_*_hook once
+ * its counter is nonzero.
  */
-static void install_hooks(const char *orig_lib)
+static void try_install_hooks(const char *orig_lib, int *n_cod, int *n_bond)
 {
-    int n_cod  = install_cod_hook(orig_lib);
-    int n_bond = install_bond_hook(orig_lib);
-    if (!n_bond) n_bond = install_bond_hook_setter_scan(orig_lib);
-
-    for (int i = 0; PLAIN_LIB_CANDIDATES[i] && (!n_cod || !n_bond); i++) {
-        const char *lib = PLAIN_LIB_CANDIDATES[i];
-        if (!n_cod) {
-            n_cod = install_cod_hook(lib);
-            if (n_cod) LOGI("install_hooks: CoD target found in fallback lib %s", lib);
-        }
-        if (!n_bond) {
-            n_bond = install_bond_hook(lib);
-            if (!n_bond) n_bond = install_bond_hook_setter_scan(lib);
-            if (n_bond) LOGI("install_hooks: Bond target found in fallback lib %s", lib);
-        }
+    if (!*n_cod)  *n_cod  = install_cod_hook(orig_lib);
+    if (!*n_bond) {
+        *n_bond = install_bond_hook(orig_lib);
+        if (!*n_bond) *n_bond = install_bond_hook_setter_scan(orig_lib);
     }
 
-    if (!n_cod)  LOGE("install_hooks: CoD target not found in any known library");
-    if (!n_bond) LOGE("install_hooks: Bond target not found in any known library");
+    for (int i = 0; PLAIN_LIB_CANDIDATES[i] && (!*n_cod || !*n_bond); i++) {
+        const char *lib = PLAIN_LIB_CANDIDATES[i];
+        if (!*n_cod) {
+            *n_cod = install_cod_hook(lib);
+            if (*n_cod) LOGI("install_hooks: CoD target found in fallback lib %s", lib);
+        }
+        if (!*n_bond) {
+            *n_bond = install_bond_hook(lib);
+            if (!*n_bond) *n_bond = install_bond_hook_setter_scan(lib);
+            if (*n_bond) LOGI("install_hooks: Bond target found in fallback lib %s", lib);
+        }
+    }
+}
+
+/*
+ * On some Qualcomm split-stack devices the vendor lib holding the real CoD/
+ * Bond code (e.g. libbluetooth_qti.so) is not mapped yet by the time
+ * JNI_OnLoad of the thin *_qti_jni.so wrapper runs — it gets loaded later by
+ * the stack's own async init, well after our fallback sweep already ran.
+ * Retried in a background thread, polling /proc/self/maps until the target
+ * shows up or we give up (~12s — Bluetooth is fully up well before then on
+ * every reference device, so this should not race a legitimate slow start).
+ */
+#define HOOK_RETRY_INTERVAL_US  (300 * 1000)
+#define HOOK_RETRY_MAX_ATTEMPTS 40
+
+typedef struct {
+    const char *orig_lib;
+    int n_cod;
+    int n_bond;
+} hook_retry_ctx_t;
+
+static void *hook_retry_thread(void *arg)
+{
+    hook_retry_ctx_t *ctx = (hook_retry_ctx_t *)arg;
+    for (int attempt = 1;
+         attempt <= HOOK_RETRY_MAX_ATTEMPTS && (!ctx->n_cod || !ctx->n_bond);
+         attempt++) {
+        usleep(HOOK_RETRY_INTERVAL_US);
+        try_install_hooks(ctx->orig_lib, &ctx->n_cod, &ctx->n_bond);
+    }
+    if (!ctx->n_cod)  LOGE("install_hooks: CoD target not found after retry — giving up");
+    if (!ctx->n_bond) LOGE("install_hooks: Bond target not found after retry — giving up");
+    free(ctx);
+    return NULL;
+}
+
+static void install_hooks(const char *orig_lib)
+{
+    int n_cod = 0, n_bond = 0;
+    try_install_hooks(orig_lib, &n_cod, &n_bond);
+
+    if (n_cod && n_bond) return;
+
+    LOGI("install_hooks: target(s) not yet mapped (cod=%d bond=%d), retrying in background",
+         n_cod, n_bond);
+
+    hook_retry_ctx_t *ctx = malloc(sizeof(*ctx));
+    if (!ctx) { LOGE("install_hooks: malloc failed"); return; }
+    ctx->orig_lib = orig_lib;
+    ctx->n_cod = n_cod;
+    ctx->n_bond = n_bond;
+
+    pthread_t t;
+    if (pthread_create(&t, NULL, hook_retry_thread, ctx) != 0) {
+        LOGE("install_hooks: pthread_create failed (errno=%d)", errno);
+        free(ctx);
+        return;
+    }
+    pthread_detach(t);
 }
 
 JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *reserved)

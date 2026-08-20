@@ -53,8 +53,11 @@ a separate, thin wrapper library from the one containing the CoD/Bond target
 functions — the latter is loaded alongside it as an unmodified `DT_NEEDED`
 dependency. The shim always scans the library it hooked `JNI_OnLoad` in
 first; if neither target is found there, it sweeps the other known library
-names still resolvable in `/proc/self/maps` and retries — no hardcoded
-pairing between the two files required.
+names still resolvable in `/proc/self/maps` — no hardcoded pairing between
+the two files required. If a target still isn't found at that point (the
+vendor lib may not be mapped yet due to async stack init), the whole scan
+retries from a background thread every 300ms for up to ~12s before giving
+up.
 
 A separate JNI library (`libjoycondroid_jni.so`) is deployed into the Joy-Con Droid
 app directory. It provides `getBluetoothAddressNative`, which reads the host Bluetooth
