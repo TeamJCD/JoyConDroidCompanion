@@ -5,8 +5,9 @@
  * Reflection chain:
  *   AdapterService.getAdapterService() → .mAdapterProperties → .mAddress (byte[6])
  *
- * Called once from shim.c:on_stack_ready(), which is triggered by hook_cod
- * after the BT stack has completed HCI Read_BD_Addr and the MAC is available.
+ * Called once from shim.c:on_stack_ready(), which is triggered by the CoD
+ * hook (cod.c) after the BT stack has completed HCI Read_BD_Addr and the MAC
+ * is available.
  *
  * FindClass only resolves app classes when called from the main thread (app
  * classloader).  btaddr_init() is called from JNI_OnLoad on the main thread

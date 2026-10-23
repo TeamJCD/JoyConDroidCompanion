@@ -207,7 +207,7 @@ jcdshim  I  patch_fn: hooked 0x...    ← Hook 2 (Bond) installed
 jcdshim  I  patch_fn: hooked 0x...    ← Hook 3 (Mode-Change) installed
 jcdshim  I  JNI_OnLoad: done
 jcdshim  I  hook_cod[0]: CoD=0x... -> forcing 0x002508
-jcdshim  I  write_bt_addr: wrote XX:XX:XX:XX:XX:XX to /dev/btaddr
+jcdshim  I  write_bt_addr: wrote AA:BB:CC:XX:XX:XX to /dev/btaddr
 ```
 
 If `patch_fn: hooked` lines are missing, the pattern scanner did not find the target

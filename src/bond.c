@@ -1,5 +1,5 @@
 /*
- * bond.c — Hook 3: btm_set_bond_type_dev
+ * bond.c — Hook 2: btm_set_bond_type_dev
  *
  * Forces BOND_TYPE_PERSISTENT (1) when the stack would otherwise choose
  * BOND_TYPE_TEMPORARY (2) during JustWorks SSP without bonding bits.
