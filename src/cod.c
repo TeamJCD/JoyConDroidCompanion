@@ -114,12 +114,12 @@ static int cod_fn_takes_raw_value(uint32_t *fn_start, uint32_t *movz_pos)
  * SCS_SAVE prologue (i.e. this function only) or COD_PTR_SCAN_WINDOW words,
  * whichever comes first.
  */
-static int cod_fn_takes_ptr_arg(uint32_t *fn_start, uint32_t *exec_end)
+static int cod_fn_takes_ptr_arg(uint32_t *fn_start, uint32_t *exec_end, int plain)
 {
     uint32_t *fn_end = fn_start + COD_PTR_SCAN_WINDOW;
     if (fn_end > exec_end) fn_end = exec_end;
     for (uint32_t *q = fn_start + 1; q < fn_end; q++) {
-        if (*q == SCS_SAVE_INSN) { fn_end = q; break; }
+        if (*q == SCS_SAVE_INSN || (plain && is_plain_fn_start(q))) { fn_end = q; break; }
     }
 
     uint8_t offset_mask[32] = {0};
@@ -150,13 +150,35 @@ int install_cod_hook(const char *libname)
 
         /* Walk back to the nearest SCS_SAVE — function entry point. */
         uint8_t *fn = NULL;
+        int plain = 0;
         for (uint32_t *q = p; q >= exec && (p - q) < 256; q--) {
             if (*q == SCS_SAVE_INSN) {
                 fn = (uint8_t *)q;
                 break;
             }
         }
-        if (!fn) continue;
+        if (!fn) {
+            /*
+             * No SCS_SAVE: stack without shadow call stack. Only accept the
+             * MOVZ if its register is stored as a halfword right after (the
+             * real HCI packet builder) — filters out source-line constants
+             * equal to 0x0C24 passed to logging/location helpers.
+             */
+            uint32_t rd = *p & 0x1Fu;
+            int stored = 0;
+            for (uint32_t *s = p + 1; s < p + 5 && s < end; s++) {
+                if ((*s & 0xFFC0001Fu) == (0x79000000u | rd)) { stored = 1; break; }
+            }
+            if (!stored) continue;
+            for (uint32_t *q = p; q > exec && (p - q) < 256; q--) {
+                if (is_plain_fn_start(q)) {
+                    fn = (uint8_t *)q;
+                    plain = 1;
+                    break;
+                }
+            }
+            if (!fn) continue;
+        }
 
         /* Skip if this function was already hooked (multiple MOVZ in one fn). */
         int dup = 0;
@@ -165,7 +187,7 @@ int install_cod_hook(const char *libname)
         }
         if (dup) continue;
 
-        if (cod_fn_takes_ptr_arg((uint32_t *)fn, end)) {
+        if (cod_fn_takes_ptr_arg((uint32_t *)fn, end, plain)) {
             if (n_ptr >= MAX_COD_PTR_HOOKS) continue;
             seen_fns[n_seen++] = fn;
             LOGI("find_cod: fn=%p (+%u bytes to MOVZ) [pointer-arg variant]", fn,

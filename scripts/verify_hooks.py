@@ -35,6 +35,42 @@ def parse_exec_segment(path):
             return words, vaddr, sz
     raise ValueError("no executable PT_LOAD segment found")
 
+# ── Function boundaries without shadow call stack ───────────────────────────
+#
+# Older stacks (e.g. Android 9 builds) have no SCS_SAVE prologue and use Clang
+# CFI: direct calls land on a jump-table slot that is a single unconditional B
+# to the real body. A plain function start is a frame-setup instruction right
+# after an unconditional end of control flow (RET/B/BR) or UDF padding.
+
+RET_INSN = 0xd65f03c0
+
+def _is_uncond_b(w):
+    return (w & 0xFC000000) == 0x14000000
+
+def _is_terminator(w):
+    return (w == RET_INSN or w == 0 or _is_uncond_b(w)
+            or (w & 0xFFFFFC1F) == 0xD61F0000)            # BR Xn
+
+def _is_frame_prologue(w):
+    if (w & 0xFFC003E0) == 0xA98003E0 and (w >> 21) & 1:  # STP Xa,Xb,[SP,#-n]!
+        return True
+    if (w & 0xFFE00FE0) == 0xF8000FE0 and (w >> 20) & 1:  # STR Xt,[SP,#-n]!
+        return True
+    return (w & 0xFF8003FF) == 0xD10003FF                  # SUB SP,SP,#n
+
+def _is_plain_fn_start(ws, j):
+    return j > 0 and _is_terminator(ws[j - 1]) and _is_frame_prologue(ws[j])
+
+def _resolve_cfi_slot(ws, idx):
+    """Follow a CFI jump-table slot (single B) to the real body index."""
+    if 0 <= idx < len(ws) and _is_uncond_b(ws[idx]):
+        imm26 = ws[idx] & 0x03FFFFFF
+        if imm26 & (1 << 25):
+            imm26 -= (1 << 26)
+        if 0 <= idx + imm26 < len(ws):
+            return idx + imm26
+    return idx
+
 # ── Hook 1: btsnd_hcic_write_dev_class (CoD) ────────────────────────────────
 #
 # Pattern: MOVZ wX, #0x0C24  (HCI opcode Write_Class_of_Device)
@@ -75,12 +111,14 @@ def _cod_fn_takes_raw_value(ws, fn_idx, movz_idx):
                 return False
     return True
 
-def _cod_fn_takes_ptr_arg(ws, fn_idx):
-    """Return True if x0 is a pointer to a 3-byte dev_class array (QTI variant)."""
+def _cod_fn_takes_ptr_arg(ws, fn_idx, plain=False):
+    """Return True if x0 is a pointer to a 3-byte dev_class array (QTI variant).
+    The window ends at the next SCS_SAVE, or for plain (non-SCS) functions at
+    the next plain function start."""
     n = len(ws)
     fn_end = min(fn_idx + COD_PTR_SCAN_WINDOW, n)
     for q in range(fn_idx + 1, fn_end):
-        if ws[q] == SCS_SAVE_INSN:
+        if ws[q] == SCS_SAVE_INSN or (plain and _is_plain_fn_start(ws, q)):
             fn_end = q
             break
     offset_mask = [0] * 32
@@ -118,6 +156,28 @@ def find_cod_fns(ws, vaddr):
                         kind = "skip"
                     results.append((fn_va, i - j, kind))
                 break
+        else:
+            # No SCS_SAVE: plain (non-SCS) stack. Only accept the MOVZ if the
+            # opcode register is stored as a halfword soon after (the real
+            # HCI packet builder) — filters out source-line constants passed
+            # to logging/location helpers that happen to equal 0x0C24.
+            rd = ws[i] & 0x1F
+            if not any((ws[k] & 0xFFC0001F) == (0x79000000 | rd)
+                       for k in range(i + 1, min(i + 5, n))):
+                continue
+            for j in range(i, max(i - 256, -1), -1):
+                if _is_plain_fn_start(ws, j):
+                    fn_va = vaddr + j * 4
+                    if fn_va not in seen:
+                        seen.add(fn_va)
+                        if _cod_fn_takes_ptr_arg(ws, j, plain=True):
+                            kind = "ptr"
+                        elif _cod_fn_takes_raw_value(ws, j, i):
+                            kind = "raw"
+                        else:
+                            kind = "skip"
+                        results.append((fn_va, i - j, kind))
+                    break
     return results
 
 # ── Hook 2: btm_set_bond_type_dev (Bond) ────────────────────────────────────
@@ -129,6 +189,25 @@ def find_cod_fns(ws, vaddr):
 # Filter1: BL preceded by STRB within 2 insns (writes bond_type before call).
 # Filter2: bond_type_ptr decoded via ADRP+ADD must be in data/BSS (>= exec_end).
 # Filter3: BL target must not have another BL in its first 8 insns (not a wrapper).
+#          A CFI jump-table slot (single B) is followed to the real body first.
+# Filter4: the target must store its second argument (w1, possibly forwarded
+#          via MOV Wd,W1) as a byte within its first 32 insns — the
+#          bond_type store every verified btm_set_bond_type_dev performs.
+
+BOND_STORE_WINDOW = 32
+
+def _stores_w1_byte(ws, fn_idx):
+    n = len(ws)
+    fwd = {1}
+    for q in range(fn_idx, min(fn_idx + BOND_STORE_WINDOW, n)):
+        w = ws[q]
+        if (w & 0xFFE0FFE0) == 0x2A0003E0 and ((w >> 16) & 0x1F) in fwd:
+            fwd.add(w & 0x1F)                       # MOV Wd, W<fwd>
+        elif (w & 0xFFC00000) == 0x39000000 and (w & 0x1F) in fwd:
+            return True                             # STRB W<fwd>, [Xn, #imm]
+        elif (w & 0xFC000000) == 0x94000000:
+            fwd -= set(range(19))                   # BL clobbers x0–x18
+    return False
 
 LDRB_ANY_MASK = 0xFFC00000
 LDRB_ANY_VAL  = 0x39400000
@@ -289,17 +368,24 @@ def find_bond_fn(ws, vaddr, exec_sz):
                 if ((ws[a] & ADRP_MASK) == ADRP_VAL and
                         (ws[a + 1] & ADD_IMM_MASK) == ADD_IMM_VAL and
                         (ws[a] & 0x1F) == strb_rn):
-                    bond_ptr = _decode_adrp_add(ws, a, vaddr)
+                    # The STRB may address a field inside the struct
+                    # (pairing_cb.bond_type at +imm12), not its base.
+                    bond_ptr = (_decode_adrp_add(ws, a, vaddr)
+                                + ((ws[strb_idx] >> 10) & 0xFFF))
                     break
 
             if not bond_ptr or bond_ptr < exec_end:
                 continue
 
-            if vaddr <= bl_tgt < vaddr + exec_sz:
-                fn_idx = (bl_tgt - vaddr) // 4
-                if any((ws[fn_idx + k] & BL_MASK) == BL_VAL
-                       for k in range(8) if fn_idx + k < n):
-                    continue  # wrapper/bridge — skip
+            if not (vaddr <= bl_tgt < vaddr + exec_sz):
+                continue
+            fn_idx = _resolve_cfi_slot(ws, (bl_tgt - vaddr) // 4)
+            bl_tgt = vaddr + fn_idx * 4
+            if any((ws[fn_idx + k] & BL_MASK) == BL_VAL
+                   for k in range(8) if fn_idx + k < n):
+                continue  # wrapper/bridge — skip
+            if not _stores_w1_byte(ws, fn_idx):
+                continue  # not a setter of its second argument
 
             return bl_tgt, bond_ptr, off0
 
@@ -334,19 +420,37 @@ SIM_FORWARD_MAX    = 64
 
 F_NONE, F_STATUS, F_HANDLE, F_MODE, F_INTERVAL = range(5)
 
-def _mc_target_has_scs_prologue(ws, idx, n):
-    if idx < 0 or idx + 1 >= n:
-        return False
-    if ws[idx] == SCS_SAVE_INSN:
-        return True
-    if ws[idx] == BTI_C_INSN and ws[idx + 1] == SCS_SAVE_INSN:
-        return True
-    return False
+# Byte-only unpack variant (stacks without halfword loads, e.g. Android 9):
+# handle = LDRB#1 | LDRB#2<<8 and interval = LDRB#4 | LDRB#5<<8, each merged
+# with BFI Wd,Wn,#8,#8 before the call.
+LDRB_OFF1_VAL = 0x39400400
+LDRB_OFF2_VAL = 0x39400800
+LDRB_OFF4_VAL = 0x39401000
+LDRB_OFF5_VAL = 0x39401400
+BFI_8_8_MASK  = 0xFFFFFC00
+BFI_8_8_VAL   = 0x33181C00     # BFI Wd,Wn,#8,#8
 
-def _mc_simulate_to_call(ws, start, n, r_status, r_handle, r_mode, r_interval):
+def _mc_resolve_target(ws, idx, n):
+    """Return the hookable body index for a call target, or None. Follows a
+    CFI jump-table slot and accepts SCS(+BTI) or plain frame prologues."""
+    idx = _resolve_cfi_slot(ws, idx)
+    if idx < 0 or idx + 1 >= n:
+        return None
+    if ws[idx] == SCS_SAVE_INSN:
+        return idx
+    if ws[idx] == BTI_C_INSN and ws[idx + 1] == SCS_SAVE_INSN:
+        return idx
+    if _is_plain_fn_start(ws, idx):
+        return idx
+    return None
+
+def _mc_simulate_to_call(ws, start, n, r_status, r_handle, r_mode, r_interval,
+                         r_handle_hi=None, r_interval_hi=None):
     holds = [F_NONE] * 32
     holds[r_status], holds[r_handle] = F_STATUS, F_HANDLE
     holds[r_mode], holds[r_interval] = F_MODE, F_INTERVAL
+    byte_variant = r_handle_hi is not None
+    merged_h = merged_i = not byte_variant
 
     win_hi = min(start + SIM_FORWARD_MAX, n)
     for q in range(start, win_hi):
@@ -355,16 +459,25 @@ def _mc_simulate_to_call(ws, start, n, r_status, r_handle, r_mode, r_interval):
             rd, rm = w & 0x1F, (w >> 16) & 0x1F
             holds[rd] = holds[rm]
             continue
+        if byte_variant and (w & BFI_8_8_MASK) == BFI_8_8_VAL:
+            rd, rn = w & 0x1F, (w >> 5) & 0x1F
+            if holds[rd] == F_HANDLE and rn == r_handle_hi:
+                merged_h = True
+                continue
+            if holds[rd] == F_INTERVAL and rn == r_interval_hi:
+                merged_i = True
+                continue
         is_bl = (w & BL_MASK) == BL_VAL
         is_b  = (w & 0xFC000000) == 0x14000000
         if is_bl or is_b:
             if holds[0] == F_STATUS and holds[1] == F_HANDLE and \
-               holds[2] == F_MODE and holds[3] == F_INTERVAL:
+               holds[2] == F_MODE and holds[3] == F_INTERVAL and \
+               merged_h and merged_i:
                 imm26 = w & 0x03FFFFFF
                 if imm26 & (1 << 25):
                     imm26 -= (1 << 26)
-                tgt_idx = q + imm26
-                if _mc_target_has_scs_prologue(ws, tgt_idx, n):
+                tgt_idx = _mc_resolve_target(ws, q + imm26, n)
+                if tgt_idx is not None:
                     return tgt_idx
             if is_b:
                 break
@@ -383,26 +496,42 @@ def find_mode_change_fn(ws, vaddr):
     for p in range(n - UNPACK_SCAN_WINDOW):
         win_hi = p + UNPACK_SCAN_WINDOW
         i_status = i_handle = i_mode = i_interval = None
+        i_h_lo = i_h_hi = i_i_lo = i_i_hi = None
         for q in range(p, win_hi):
             w = ws[q]
+            m = w & 0xFFFFFC00
             if i_status is None and (w & LDRB_OFF0_MASK) == LDRB_OFF0_VAL: i_status = q
             if i_handle is None and (w & LDURH_OFF1_MASK) == LDURH_OFF1_VAL: i_handle = q
             if i_mode is None and (w & LDRB_OFF3_MASK) == LDRB_OFF3_VAL: i_mode = q
             if i_interval is None and (w & LDRH_OFF4_MASK) == LDRH_OFF4_VAL: i_interval = q
+            if i_h_lo is None and m == LDRB_OFF1_VAL: i_h_lo = q
+            if i_h_hi is None and m == LDRB_OFF2_VAL: i_h_hi = q
+            if i_i_lo is None and m == LDRB_OFF4_VAL: i_i_lo = q
+            if i_i_hi is None and m == LDRB_OFF5_VAL: i_i_hi = q
+
+        rn = lambda idx: (ws[idx] >> 5) & 0x1F
+        rt = lambda idx: ws[idx] & 0x1F
+        hi_regs = (None, None)
+        extra = []
+        if None in (i_handle, i_interval) and None not in (i_h_lo, i_h_hi, i_i_lo, i_i_hi):
+            # byte-only variant
+            i_handle, i_interval = i_h_lo, i_i_lo
+            hi_regs = (rt(i_h_hi), rt(i_i_hi))
+            extra = [i_h_hi, i_i_hi]
         if None in (i_status, i_handle, i_mode, i_interval):
             continue
 
-        rn = lambda idx: (ws[idx] >> 5) & 0x1F
-        if not (rn(i_status) == rn(i_handle) == rn(i_mode) == rn(i_interval)):
+        if len({rn(k) for k in [i_status, i_handle, i_mode, i_interval] + extra}) != 1:
             continue
 
-        rt = lambda idx: ws[idx] & 0x1F
         r_status, r_handle, r_mode, r_interval = rt(i_status), rt(i_handle), rt(i_mode), rt(i_interval)
-        if len({r_status, r_handle, r_mode, r_interval}) != 4:
+        if len({r_status, r_handle, r_mode, r_interval, *[r for r in hi_regs if r is not None]}) \
+                != 4 + len(extra):
             continue
 
-        last = max(i_status, i_handle, i_mode, i_interval)
-        tgt_idx = _mc_simulate_to_call(ws, last + 1, n, r_status, r_handle, r_mode, r_interval)
+        last = max([i_status, i_handle, i_mode, i_interval] + extra)
+        tgt_idx = _mc_simulate_to_call(ws, last + 1, n, r_status, r_handle, r_mode, r_interval,
+                                       *hi_regs)
         if tgt_idx is None:
             continue
 

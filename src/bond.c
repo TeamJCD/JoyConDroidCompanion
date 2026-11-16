@@ -122,6 +122,30 @@ static int reg_from_local_adrp(uint32_t *win_lo, uint32_t *p, uint32_t rn)
     return 0;
 }
 
+/*
+ * True if the function at `fn` stores its second argument (w1, possibly
+ * forwarded via MOV Wd,W1) as a byte within its first 32 insns — the
+ * bond_type store every verified btm_set_bond_type_dev performs. Rejects
+ * call targets with a matching call site but unrelated semantics (e.g. a CFI
+ * slot of bta_sys_remove_uuid on Android-9 stacks). A BL clobbers x0–x18,
+ * so forwarded caller-saved registers are dropped after one.
+ */
+#define BOND_STORE_WINDOW 32
+static int stores_w1_byte(const uint32_t *fn, const uint32_t *end)
+{
+    uint32_t fwd = 1u << 1;   /* bitmask of registers holding w1 */
+    for (const uint32_t *q = fn; q < fn + BOND_STORE_WINDOW && q < end; q++) {
+        uint32_t w = *q;
+        if ((w & 0xFFE0FFE0u) == 0x2A0003E0u && (fwd & (1u << ((w >> 16) & 0x1Fu))))
+            fwd |= 1u << (w & 0x1Fu);                       /* MOV Wd, W<fwd> */
+        else if ((w & STRB_MASK) == STRB_VAL && (fwd & (1u << (w & 0x1Fu))))
+            return 1;                                       /* STRB W<fwd>, [..] */
+        else if ((w & BL_INSN_MASK) == BL_INSN_VAL)
+            fwd &= ~0x7FFFFu;                               /* x0–x18 clobbered */
+    }
+    return 0;
+}
+
 static uint8_t *find_bond_fn(const char *libname)
 {
     size_t exec_size = 0;
@@ -178,7 +202,9 @@ static uint8_t *find_bond_fn(const char *libname)
                 if ((*a & ADRP_MASK) != ADRP_VAL) continue;
                 if ((*(a + 1) & ADD_IMM_MASK) != ADD_IMM_VAL) continue;
                 if (ADRP_RD(*a) != STRB_RN(*strb_insn)) continue;
-                cand = decode_adrp_add(a);
+                /* The STRB may address a field inside the struct
+                 * (pairing_cb.bond_type at +imm12), not its base. */
+                cand = decode_adrp_add(a) + ((*strb_insn >> 10) & 0xFFFu);
                 break;
             }
 
@@ -190,6 +216,13 @@ static uint8_t *find_bond_fn(const char *libname)
                      (void *)cand, (void *)q);
                 continue;
             }
+
+            if ((uint32_t *)bl_tgt < exec || (uint32_t *)bl_tgt >= end)
+                continue;
+            /* CFI builds call through a jump-table slot (single B) — hook the
+             * real body, never the slot: the 16-byte trampoline would
+             * overwrite the neighbouring slots. */
+            bl_tgt = (uintptr_t)resolve_cfi_slot((uint32_t *)bl_tgt, exec, end);
 
             /* btm_set_bond_type_dev is a simple setter — it does not call
              * other functions in its prologue.  Reject BL targets that have
@@ -205,6 +238,11 @@ static uint8_t *find_bond_fn(const char *libname)
                          (void *)bl_tgt);
                     continue;
                 }
+            }
+            if (!stores_w1_byte((uint32_t *)bl_tgt, end)) {
+                LOGI("find_bond: BL target %p does not store its 2nd arg, skipping",
+                     (void *)bl_tgt);
+                continue;
             }
             g_pairing_cb_bond_type = cand;
             LOGI("find_bond: btm_set_bond_type_dev=%p  bond_type_ptr=%p",

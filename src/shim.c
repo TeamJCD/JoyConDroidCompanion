@@ -102,12 +102,26 @@ static void *find_exported_sym(const char *libname, const char *sym)
     uint64_t phoff = *(uint64_t *)(b + 0x20);
     uint16_t phnum = *(uint16_t *)(b + 0x38);
 
-    uint8_t *dyn = NULL;
+    /*
+     * The lowest mapping holds the ELF header, but it is only the load bias
+     * if the first PT_LOAD starts at vaddr 0. Some vendor libraries are
+     * linked with a non-zero image base (first PT_LOAD at e.g. 0x7000), so
+     * the bias is the mapping start minus that segment's page-aligned vaddr.
+     * All vaddrs (PT_DYNAMIC, d_ptr, st_value) are relative to the bias.
+     */
+    uint64_t min_vaddr = UINT64_MAX;
+    uint64_t dyn_vaddr = 0;
+    int have_dyn = 0;
     for (int i = 0; i < phnum; i++) {
         uint8_t *ph = b + phoff + (uint64_t)i * 56;
-        if (*(uint32_t *)ph == 2u) { dyn = b + *(uint64_t *)(ph + 16); break; }
+        uint32_t p_type = *(uint32_t *)ph;
+        uint64_t p_vaddr = *(uint64_t *)(ph + 16);
+        if (p_type == 1u && p_vaddr < min_vaddr) min_vaddr = p_vaddr;
+        if (p_type == 2u) { dyn_vaddr = p_vaddr; have_dyn = 1; }
     }
-    if (!dyn) return NULL;
+    if (!have_dyn || min_vaddr == UINT64_MAX) return NULL;
+    b -= min_vaddr & ~(uint64_t)0xfff;
+    uint8_t *dyn = b + dyn_vaddr;
 
     uint8_t *strtab = NULL, *symtab = NULL;
     uint8_t *gnu_hash = NULL, *sysv_hash = NULL;

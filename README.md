@@ -28,10 +28,13 @@ The module has two components:
 ### BT Stack Shim
 
 Auto-detects the Bluetooth library on the device (APEX-based `libbluetooth_jni.so`,
-system/vendor `libbluetooth.so`, Qualcomm `libbluetooth_qti.so`, `system_ext`-based
-QTI variant, or the older split-stack `libbluetooth_jni.so`/`libbluetooth_qti_jni.so`
-— see below) and replaces it with a matching shim via a bind-mount overlay. The shim
-loads the original library alongside itself and installs three inline trampoline hooks:
+Qualcomm `libbluetooth_qti.so`, `system_ext`-based QTI variant, the split-stack
+`libbluetooth_qti_jni.so`, or a non-APEX `/system/lib64/libbluetooth_jni.so` —
+see below) and replaces it with a matching shim. APEX, vendor and QTI libraries
+are replaced via a bind-mount overlay; a non-APEX `/system/lib64` library is
+handed to Magisk's Magic Mount instead (the shim and the renamed original are
+placed under the module's `system/lib64/` at boot). The shim loads the original
+library alongside itself and installs three inline trampoline hooks:
 
 | Hook | Target function | Effect |
 |------|----------------|--------|
@@ -60,7 +63,17 @@ names still resolvable in `/proc/self/maps` — no hardcoded pairing between
 the two files required. If a target still isn't found at that point (the
 vendor lib may not be mapped yet due to async stack init), the whole scan
 retries from a background thread every 300ms for up to ~12s before giving
-up.
+up. Non-APEX stacks in `/system` (e.g. Android 9) take this path too: the shim
+replaces `libbluetooth_jni.so` (the only one with a `JNI_OnLoad`), and the
+hook targets live in `libbluetooth.so`, which the stack `dlopen`s later.
+
+Older stacks built without shadow call stack and with Clang CFI (e.g. Samsung
+Android 9) have no `SCS_SAVE` prologue to anchor on, and direct calls go
+through CFI jump-table slots (a single `B` to the real function). The scanners
+recognise a function start there as a frame-setup instruction right after an
+unconditional branch, `RET` or padding, and always follow a slot to the real
+function body before hooking — patching the slot itself would overwrite its
+neighbours.
 
 A separate JNI library (`libjoycondroid_jni.so`) is deployed into the Joy-Con Droid
 app directory. It provides `getBluetoothAddressNative`, which reads the host Bluetooth
@@ -220,6 +233,8 @@ function — the OEM may have a modified BT stack. Open an issue using the steps
 pull the correct `libbluetooth*.so` from a connected device via `adb` and save it
 to `scripts/libs/<Manufacturer>/<Model>/`. The search order mirrors
 `post-fs-data.sh`: APEX → vendor QTI → system QTI → system_ext QTI → system.
+For a non-APEX system stack the scripts pull `libbluetooth.so` rather than the
+`libbluetooth_jni.so` the module replaces, since the hook targets live there.
 
 ```sh
 # Linux / macOS

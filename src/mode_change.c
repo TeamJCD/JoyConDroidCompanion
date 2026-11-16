@@ -118,12 +118,34 @@ static void hook_mode_change(uint32_t status, uint32_t handle, uint32_t mode, ui
         g_orig_stub(status, handle, mode, interval);
 }
 
-static int target_has_scs_prologue(const uint32_t *tgt, const uint32_t *exec, const uint32_t *end)
+/*
+ * Byte-only unpack variant (stacks without halfword loads, e.g. Android 9):
+ * handle = LDRB#1 | LDRB#2<<8 and interval = LDRB#4 | LDRB#5<<8, each merged
+ * with BFI Wd,Wn,#8,#8 before the call.
+ */
+#define LDRB_BYTE_MASK 0xFFFFFC00u
+#define LDRB_OFF1_VAL  0x39400400u
+#define LDRB_OFF2_VAL  0x39400800u
+#define LDRB_OFF4_VAL  0x39401000u
+#define LDRB_OFF5_VAL  0x39401400u
+#define BFI_8_8_MASK   0xFFFFFC00u
+#define BFI_8_8_VAL    0x33181C00u   /* BFI Wd,Wn,#8,#8 */
+#define NO_REG         32u
+
+/*
+ * Returns the hookable body for a call target, or NULL. Follows a CFI
+ * jump-table slot (never hook the slot itself — the trampoline would
+ * overwrite its neighbours) and accepts an SCS(+BTI) prologue or, on stacks
+ * without SCS, a plain frame-setup prologue.
+ */
+static uint32_t *resolve_target(uint32_t *tgt, uint32_t *exec, uint32_t *end)
 {
-    if (tgt < exec || tgt + 1 >= end) return 0;
-    if (*tgt == SCS_SAVE_INSN) return 1;
-    if (*tgt == BTI_C_INSN && *(tgt + 1) == SCS_SAVE_INSN) return 1;
-    return 0;
+    tgt = resolve_cfi_slot(tgt, exec, end);
+    if (tgt <= exec || tgt + 1 >= end) return NULL;
+    if (*tgt == SCS_SAVE_INSN) return tgt;
+    if (*tgt == BTI_C_INSN && *(tgt + 1) == SCS_SAVE_INSN) return tgt;
+    if (is_plain_fn_start(tgt)) return tgt;
+    return NULL;
 }
 
 /* Field tags tracked per register during the forward simulation. */
@@ -135,15 +157,18 @@ enum { F_NONE = 0, F_STATUS, F_HANDLE, F_MODE, F_INTERVAL };
  * as (status,handle,mode,interval) and the target has an SCS_SAVE prologue,
  * or NULL if nothing qualifies within SIM_FORWARD_MAX instructions.
  */
-static uint32_t *simulate_to_call(uint32_t *start, uint32_t *end, const uint32_t *exec,
+static uint32_t *simulate_to_call(uint32_t *start, uint32_t *end, uint32_t *exec,
                                    uint32_t r_status, uint32_t r_handle,
-                                   uint32_t r_mode, uint32_t r_interval)
+                                   uint32_t r_mode, uint32_t r_interval,
+                                   uint32_t r_handle_hi, uint32_t r_interval_hi)
 {
     uint8_t holds[32] = {0};
     holds[r_status]   = F_STATUS;
     holds[r_handle]   = F_HANDLE;
     holds[r_mode]     = F_MODE;
     holds[r_interval] = F_INTERVAL;
+    int byte_variant = r_handle_hi != NO_REG;
+    int merged_h = !byte_variant, merged_i = !byte_variant;
 
     uint32_t *win_hi = start + SIM_FORWARD_MAX;
     if (win_hi > end) win_hi = end;
@@ -155,14 +180,20 @@ static uint32_t *simulate_to_call(uint32_t *start, uint32_t *end, const uint32_t
             holds[rd] = holds[rm];
             continue;
         }
+        if (byte_variant && (w & BFI_8_8_MASK) == BFI_8_8_VAL) {
+            uint32_t rd = w & 0x1Fu, rn = (w >> 5) & 0x1Fu;
+            if (holds[rd] == F_HANDLE && rn == r_handle_hi)     { merged_h = 1; continue; }
+            if (holds[rd] == F_INTERVAL && rn == r_interval_hi) { merged_i = 1; continue; }
+        }
         int is_bl = (w & BL_MASK) == BL_VAL;
         int is_b  = (w & B_MASK)  == B_VAL;
         if (is_bl || is_b) {
             if (holds[0] == F_STATUS && holds[1] == F_HANDLE &&
-                holds[2] == F_MODE   && holds[3] == F_INTERVAL) {
+                holds[2] == F_MODE   && holds[3] == F_INTERVAL &&
+                merged_h && merged_i) {
                 int32_t imm26 = (int32_t)((w & 0x03FFFFFFu) << 6) >> 6;
-                uint32_t *tgt = q + imm26;
-                if (target_has_scs_prologue(tgt, exec, end))
+                uint32_t *tgt = resolve_target(q + imm26, exec, end);
+                if (tgt)
                     return tgt;
             }
             if (is_b) break; /* unconditional branch ends this basic block */
@@ -192,30 +223,60 @@ static uint8_t *find_mode_change_fn(const char *libname)
         uint32_t *win_hi = p + UNPACK_SCAN_WINDOW;
 
         uint32_t *i_status = NULL, *i_handle = NULL, *i_mode = NULL, *i_interval = NULL;
+        uint32_t *i_h_lo = NULL, *i_h_hi = NULL, *i_i_lo = NULL, *i_i_hi = NULL;
         for (uint32_t *q = p; q < win_hi; q++) {
+            uint32_t m = *q & LDRB_BYTE_MASK;
             if (!i_status   && (*q & LDRB_OFF0_MASK)  == LDRB_OFF0_VAL)  i_status = q;
             if (!i_handle   && (*q & LDURH_OFF1_MASK) == LDURH_OFF1_VAL) i_handle = q;
             if (!i_mode     && (*q & LDRB_OFF3_MASK)  == LDRB_OFF3_VAL)  i_mode = q;
             if (!i_interval && (*q & LDRH_OFF4_MASK)  == LDRH_OFF4_VAL)  i_interval = q;
+            if (!i_h_lo && m == LDRB_OFF1_VAL) i_h_lo = q;
+            if (!i_h_hi && m == LDRB_OFF2_VAL) i_h_hi = q;
+            if (!i_i_lo && m == LDRB_OFF4_VAL) i_i_lo = q;
+            if (!i_i_hi && m == LDRB_OFF5_VAL) i_i_hi = q;
+        }
+
+        /* Halfword loads missing: try the byte-only variant (all six bytes
+         * loaded individually, hi bytes merged via BFI before the call). */
+        uint32_t r_handle_hi = NO_REG, r_interval_hi = NO_REG;
+        if ((!i_handle || !i_interval) && i_h_lo && i_h_hi && i_i_lo && i_i_hi) {
+            i_handle = i_h_lo;
+            i_interval = i_i_lo;
+            r_handle_hi = LD_RT(*i_h_hi);
+            r_interval_hi = LD_RT(*i_i_hi);
+        } else {
+            i_h_hi = i_i_hi = NULL;
         }
         if (!i_status || !i_handle || !i_mode || !i_interval) continue;
-        if (LD_RN(*i_status) != LD_RN(*i_handle) ||
-            LD_RN(*i_status) != LD_RN(*i_mode) ||
-            LD_RN(*i_status) != LD_RN(*i_interval))
+
+        uint32_t base = LD_RN(*i_status);
+        if (LD_RN(*i_handle) != base || LD_RN(*i_mode) != base ||
+            LD_RN(*i_interval) != base ||
+            (i_h_hi && (LD_RN(*i_h_hi) != base || LD_RN(*i_i_hi) != base)))
             continue;
 
-        uint32_t r_status = LD_RT(*i_status), r_handle = LD_RT(*i_handle);
-        uint32_t r_mode = LD_RT(*i_mode), r_interval = LD_RT(*i_interval);
-        if (r_status == r_handle || r_status == r_mode || r_status == r_interval ||
-            r_handle == r_mode   || r_handle == r_interval || r_mode == r_interval)
-            continue; /* the four fields must land in four distinct registers */
+        /* All loaded fields (4, or 6 in the byte variant) must land in
+         * distinct registers. */
+        uint32_t regs[6] = { LD_RT(*i_status), LD_RT(*i_handle),
+                             LD_RT(*i_mode), LD_RT(*i_interval),
+                             r_handle_hi, r_interval_hi };
+        int n_regs = i_h_hi ? 6 : 4, distinct = 1;
+        for (int a = 0; a < n_regs && distinct; a++)
+            for (int b = a + 1; b < n_regs; b++)
+                if (regs[a] == regs[b]) { distinct = 0; break; }
+        if (!distinct) continue;
+        uint32_t r_status = regs[0], r_handle = regs[1];
+        uint32_t r_mode = regs[2], r_interval = regs[3];
 
         uint32_t *last = i_status;
         if (i_handle > last) last = i_handle;
         if (i_mode > last) last = i_mode;
         if (i_interval > last) last = i_interval;
+        if (i_h_hi && i_h_hi > last) last = i_h_hi;
+        if (i_i_hi && i_i_hi > last) last = i_i_hi;
 
-        uint32_t *tgt = simulate_to_call(last + 1, end, exec, r_status, r_handle, r_mode, r_interval);
+        uint32_t *tgt = simulate_to_call(last + 1, end, exec, r_status, r_handle, r_mode,
+                                         r_interval, r_handle_hi, r_interval_hi);
         if (!tgt) continue;
 
         if (!match) {
