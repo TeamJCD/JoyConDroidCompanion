@@ -238,7 +238,8 @@ function — the OEM may have a modified BT stack. Open an issue using the steps
 `scripts/pull.sh` (Linux/macOS) and `scripts/pull.ps1` (Windows PowerShell 5.1+)
 pull the correct `libbluetooth*.so` from a connected device via `adb` and save it
 to `scripts/libs/<Manufacturer>/<Model>/`. The search order mirrors
-`post-fs-data.sh`: APEX → vendor QTI → system QTI → system_ext QTI → system.
+`post-fs-data.sh`: APEX → QTI split-stack (vendor → system → system_ext) →
+vendor QTI → system QTI → system_ext QTI → system.
 For a non-APEX system stack the scripts pull `libbluetooth.so` rather than the
 `libbluetooth_jni.so` the module replaces, since the hook targets live there.
 
