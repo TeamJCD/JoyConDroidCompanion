@@ -30,9 +30,9 @@ ZIP     = $(BUILD)/JoyConDroidCompanion.zip
 # --- Shim -----------------------------------------------------------------
 SHIM_SRCS = src/shim.c src/cod.c src/bond.c src/bond_setter_scan.c src/btaddr.c \
             src/mode_change.c src/mode_change_shape_scan.c
-# One variant per BT library (APEX / pre-APEX / QTI / QTI split-stack).
+# One variant per replaced library SONAME: libbluetooth_jni.so (APEX and
+# non-APEX /system), libbluetooth_qti.so, libbluetooth_qti_jni.so (split-stack).
 SHIMS     = $(BUILD)/libbluetooth_jni_shim.so \
-            $(BUILD)/libbluetooth_shim.so \
             $(BUILD)/libbluetooth_qti_shim.so \
             $(BUILD)/libbluetooth_qti_jni_shim.so
 
@@ -111,7 +111,6 @@ $(BUILD)/libbluetooth$(1)_shim.so: $(SHIM_SRCS) $(BUILD)/libbluetooth$(1)_orig_s
 endef
 
 $(eval $(call shim-variant,_jni))
-$(eval $(call shim-variant,))
 $(eval $(call shim-variant,_qti))
 $(eval $(call shim-variant,_qti_jni))
 

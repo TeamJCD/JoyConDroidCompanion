@@ -17,8 +17,10 @@ if [ -z "$MANUFACTURER" ] || [ -z "$MODEL" ]; then
 fi
 
 # _orig.so variants come first: when the module is already installed the
-# bind-mount overlays the canonical name with the shim, but leaves the
-# renamed original accessible as *_orig.so in the same directory.
+# canonical name shows the shim, but the renamed original is accessible as
+# *_orig.so in the same directory. libbluetooth.so (non-APEX /system stack)
+# is never replaced — the module swaps libbluetooth_jni.so, the hook targets
+# live in libbluetooth.so — so it has no _orig variant.
 CANDIDATES=(
     "/apex/com.android.btservices/lib64/libbluetooth_jni_orig.so"
     "/apex/com.android.btservices/lib64/libbluetooth_jni.so"
@@ -36,7 +38,6 @@ CANDIDATES=(
     "/system/lib64/libbluetooth_qti.so"
     "/system/system_ext/lib64/libbluetooth_qti_orig.so"
     "/system/system_ext/lib64/libbluetooth_qti.so"
-    "/system/lib64/libbluetooth_orig.so"
     "/system/lib64/libbluetooth.so"
 )
 

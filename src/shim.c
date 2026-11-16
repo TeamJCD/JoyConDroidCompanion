@@ -1,9 +1,10 @@
 /*
  * shim.c — libbluetooth_jni.so replacement for the BT process.
  *
- * Loaded instead of the real library via APEX bind-mount overlay.
- * DT_NEEDED: libbluetooth_jni_orig.so (SONAME patched to .sx) loads the real
- * 13 MB library alongside and provides libc symbols transitively.
+ * Loaded instead of the real library via bind-mount overlay or Magisk's
+ * Magic Mount (see post-fs-data.sh).
+ * DT_NEEDED: libbluetooth*_orig.so (SONAME patched to .sx) loads the real
+ * library alongside and provides libc symbols transitively.
  *
  * Three inline trampoline hooks (see cod.c, bond.c, mode_change.c):
  *   cod.c         — btsnd_hcic_write_dev_class  forces CoD to 0x002508
@@ -333,17 +334,18 @@ void on_stack_ready(void)
 /* ── Entry point ── */
 
 static const char * const ORIG_LIB_CANDIDATES[] = {
-    "libbluetooth_jni_orig.so",       /* APEX-based Bluetooth (Mainline module) */
-    "libbluetooth_orig.so",           /* non-APEX Bluetooth (/system or /vendor) */
+    "libbluetooth_jni_orig.so",       /* APEX, or non-APEX /system (e.g. Android 9) */
     "libbluetooth_qti_orig.so",       /* Qualcomm non-APEX */
     "libbluetooth_qti_jni_orig.so",   /* Qualcomm split-stack JNI wrapper */
     NULL
 };
 
 /*
- * Plain (non-"_orig") SONAME for each candidate above, position-matched —
- * the name a genuine, unmodified vendor lib would carry if it's loaded as a
- * DT_NEEDED dependency rather than being the file we bind-mounted over.
+ * Plain (non-"_orig") SONAMEs of the known BT library families — the name a
+ * genuine, unmodified lib carries if it's loaded as a DT_NEEDED dependency or
+ * dlopen'ed by the stack rather than being the file we replaced.
+ * libbluetooth.so has no _orig counterpart: on non-APEX /system stacks it is
+ * never replaced, the stack dlopens it after JNI_OnLoad (retry thread).
  *
  * Used as hook-scan fallback targets: on some Qualcomm split-stack devices,
  * JNI_OnLoad lives in a thin "*_qti_jni.so" wrapper while the actual
