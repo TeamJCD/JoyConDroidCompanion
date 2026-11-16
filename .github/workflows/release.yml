@@ -40,6 +40,17 @@ jobs:
           RRO_KEYPASS: ${{ secrets.RRO_KEYPASS }}
           RRO_ALIAS: ${{ secrets.RRO_ALIAS }}
 
+      # Notes come from the Conventional Commits between the previous and this
+      # tag (cliff.toml), so direct pushes to main are covered too, unlike
+      # --generate-notes, which only lists merged pull requests.
+      - name: Generate release notes
+        uses: orhun/git-cliff-action@a9a95522b26fe6403f7bb24031f21fb573d0f5ff  # v4.9.1
+        with:
+          config: cliff.toml
+          args: --latest
+        env:
+          OUTPUT: RELEASE_NOTES.md
+
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -48,7 +59,7 @@ jobs:
           cp build/JoyConDroidCompanion.zip "JoyConDroidCompanion-${VERSION}.zip"
           gh release create "$VERSION" \
             --title "$VERSION" \
-            --generate-notes \
+            --notes-file RELEASE_NOTES.md \
             "JoyConDroidCompanion-${VERSION}.zip"
 
       - name: Commit release metadata

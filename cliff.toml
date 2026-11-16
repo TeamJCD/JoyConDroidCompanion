@@ -1,0 +1,35 @@
+# git-cliff ~ configuration file
+# https://git-cliff.org/docs/configuration
+
+[changelog]
+body = """
+{%- set repo = "https://github.com/TeamJCD/JoyConDroidCompanion" -%}
+{% for entry in commits | commit_groups(groups=commit_parsers_groups) %}
+## {{ entry.group }}
+{% for commit in entry.commits %}
+- {% if commit.breaking %}[**breaking**] {% endif %}{% if commit.scope %}**{{ commit.scope }}:** {% endif %}\
+{{ commit.message | upper_first }} \
+([{{ commit.id | truncate(length=7, end="") }}]({{ repo }}/commit/{{ commit.id }}))\
+{% endfor %}
+{% endfor %}
+{% if version and previous.version %}
+**Full Changelog**: {{ repo }}/compare/{{ previous.version }}...{{ version }}
+{% endif %}
+"""
+
+[git]
+# Drop commits that match no parser below.
+filter_commits = true
+commit_parsers = [
+    # Nothing here changes the module ZIP: dependency updates (Renovate),
+    # release metadata commits from the release workflow, repository/CI-only
+    # changes (ci: or chore(ci):) and documentation.
+    { message = "^(chore\\((deps|ci)\\)|ci|docs)", skip = true },
+    { message = "^chore: update module\\.prop and update\\.json", skip = true },
+    { message = "^feat", group = "Features" },
+    { message = "^fix", group = "Bug Fixes" },
+    { message = "^perf", group = "Performance" },
+    { message = "^refactor", group = "Refactor" },
+    { message = "^revert", group = "Reverts" },
+    { message = "^chore", group = "Chores" },
+]
