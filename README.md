@@ -30,10 +30,11 @@ The module has two components:
 Auto-detects the Bluetooth library on the device (APEX-based `libbluetooth_jni.so`,
 Qualcomm `libbluetooth_qti.so`, `system_ext`-based QTI variant, the split-stack
 `libbluetooth_qti_jni.so`, or a non-APEX `/system/lib64/libbluetooth_jni.so` —
-see below) and replaces it with a matching shim. APEX, vendor and QTI libraries
-are replaced via a bind-mount overlay; a non-APEX `/system/lib64` library is
-handed to Magisk's Magic Mount instead (the shim and the renamed original are
-placed under the module's `system/lib64/` at boot). The shim loads the original
+see below) and replaces it with a matching shim. APEX libraries are replaced via
+a bind-mount overlay, since Magic Mount cannot reach `/apex`; all other libraries
+(`/system`, `/system_ext`, `/vendor`) are handed to Magisk's Magic Mount (the shim
+and the renamed original are placed under the module's `system/` tree at boot,
+e.g. `system/vendor/lib64/` for a vendor library). The shim loads the original
 library alongside itself and installs three inline trampoline hooks:
 
 | Hook | Target function | Effect |

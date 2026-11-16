@@ -3,7 +3,10 @@ MODDIR="${0%/*}"
 
 chmod 755 "$MODDIR/patch_sym"
 
-# Sets up a bind-mount overlay over LIB_DIR, replacing LIB_NAME with the shim.
+# APEX only: sets up a bind-mount overlay over LIB_DIR, replacing LIB_NAME
+# with the shim. Magic Mount cannot reach /apex (apexd mounts each module from
+# its own image; Magisk only covers /system, /vendor, /product, /system_ext),
+# so a bind mount over a copy of the directory is the only option there.
 # The original is copied as LIB_NAME → ${LIB_NAME%.so}_orig.so with its SONAME
 # patched to .sx so the linker does not deduplicate it against the shim.
 setup_overlay() {
@@ -32,24 +35,43 @@ setup_overlay() {
     mount --bind "$OVERLAY" "$LIB_DIR"
 }
 
-# Non-APEX /system/lib64: hand the shim and the patched original to Magisk's
-# Magic Mount instead of bind-mounting a copy of the whole directory. The
-# copy approach drops subdirectories (hw/, drm/, ...) and hard-codes the
-# Android 10+ label system_lib_file, which does not exist on Android 9.
+# Non-APEX libraries (/system, /system_ext, /vendor): hand the shim and the
+# patched original to Magisk's Magic Mount instead of bind-mounting a copy of
+# the whole directory. The copy approach drops subdirectories (hw/, drm/, ...)
+# and hard-codes the label system_lib_file, which is wrong for /vendor and
+# does not exist on Android 9. Magic Mount mirrors the rest of the directory
+# and takes directory attributes from the real one.
 # Magisk runs module post-fs-data scripts before it applies module files, so
 # files placed under $MODDIR/system/ here are mounted in the same boot, and
-# /system still shows the unmodified original at this point.
+# the partitions still show the unmodified originals at this point.
+# Module paths: /system/X -> system/X, /vendor/X -> system/vendor/X; Magisk
+# maps system/vendor and system/system_ext onto their own partitions when
+# those exist.
 setup_magic_mount() {
-    local LIB_NAME="$1"
-    local SRC="/system/lib64/$LIB_NAME"
+    local LIB_DIR="$1"
+    local LIB_NAME="$2"
+    local SRC="$LIB_DIR/$LIB_NAME"
     local ORIG_NAME="${LIB_NAME%.so}_orig.so"
-    local DST="$MODDIR/system/lib64"
-    local CTX
+    local DST CTX DIR_CTX FALLBACK_CTX
+
+    case "$LIB_DIR" in
+        /system/*) DST="$MODDIR$LIB_DIR" ;;
+        *)         DST="$MODDIR/system$LIB_DIR" ;;
+    esac
+    case "$LIB_DIR" in
+        /vendor/*) FALLBACK_CTX=u:object_r:vendor_file:s0 ;;
+        *)         FALLBACK_CTX=u:object_r:system_file:s0 ;;
+    esac
 
     CTX=$(ls -Z "$SRC" 2>/dev/null | awk '{print $1}')
     case "$CTX" in
         u:object_r:*) ;;
-        *) CTX=u:object_r:system_file:s0 ;;
+        *) CTX=$FALLBACK_CTX ;;
+    esac
+    DIR_CTX=$(ls -Zd "$LIB_DIR" 2>/dev/null | awk '{print $1}')
+    case "$DIR_CTX" in
+        u:object_r:*) ;;
+        *) DIR_CTX=$FALLBACK_CTX ;;
     esac
 
     mkdir -p "$DST"
@@ -64,12 +86,16 @@ setup_magic_mount() {
         chmod 0644 "$f"
         chcon "$CTX" "$f"
     done
-    chcon u:object_r:system_file:s0 "$MODDIR/system" "$DST"
+    chcon "$DIR_CTX" "$DST"
+    chcon u:object_r:system_file:s0 "$MODDIR/system"
 }
 
 # Files from a previous boot's Magic Mount setup; recreated below if the
 # device still needs them (keeps them in sync with OTA-updated originals).
-rm -rf "$MODDIR/system/lib64"
+# Only the lib64 dirs: system/vendor/overlay/ ships with the module.
+rm -rf "$MODDIR/system/lib64" \
+       "$MODDIR/system/system_ext/lib64" \
+       "$MODDIR/system/vendor/lib64"
 
 # Pre-create /dev/btaddr and /dev/btlinkmode so the BT shim (bluetooth domain)
 # can write to them. Need to exist before BT starts; post-fs-data.sh runs as
@@ -95,24 +121,24 @@ elif [ -f "$APEX_LIB_LEGACY/libbluetooth_jni.so" ]; then
 # CoD/Bond code stays in libbluetooth_qti.so (its DT_NEEDED dependency, left
 # untouched — the shim locates and hooks it live in memory). Must be checked
 # before the plain libbluetooth_qti.so branches below, since on these devices
-# only the _jni wrapper may be bind-mounted, never the vendor lib itself.
+# only the _jni wrapper may be replaced, never the vendor lib itself.
 elif [ -f /vendor/lib64/libbluetooth_qti_jni.so ]; then
-    setup_overlay /vendor/lib64 libbluetooth_qti_jni.so
+    setup_magic_mount /vendor/lib64 libbluetooth_qti_jni.so
 elif [ -f /system/lib64/libbluetooth_qti_jni.so ]; then
-    setup_overlay /system/lib64 libbluetooth_qti_jni.so
+    setup_magic_mount /system/lib64 libbluetooth_qti_jni.so
 elif [ -f /system/system_ext/lib64/libbluetooth_qti_jni.so ]; then
-    setup_overlay /system/system_ext/lib64 libbluetooth_qti_jni.so
+    setup_magic_mount /system/system_ext/lib64 libbluetooth_qti_jni.so
 elif [ -f /vendor/lib64/libbluetooth_qti.so ]; then
-    setup_overlay /vendor/lib64 libbluetooth_qti.so
+    setup_magic_mount /vendor/lib64 libbluetooth_qti.so
 elif [ -f /system/lib64/libbluetooth_qti.so ]; then
-    setup_overlay /system/lib64 libbluetooth_qti.so
+    setup_magic_mount /system/lib64 libbluetooth_qti.so
 elif [ -f /system/system_ext/lib64/libbluetooth_qti.so ]; then
-    setup_overlay /system/system_ext/lib64 libbluetooth_qti.so
+    setup_magic_mount /system/system_ext/lib64 libbluetooth_qti.so
 # Non-APEX stack in /system (e.g. Android 9): the JNI entry point lives in
 # libbluetooth_jni.so, which System.loadLibrary loads and whose JNI_OnLoad
 # starts the shim. libbluetooth.so (the stack itself, where the hook targets
 # live) has no JNI_OnLoad and is dlopen'ed later by classInitNative; the
 # shim finds it via PLAIN_LIB_CANDIDATES and its retry thread.
 elif [ -f /system/lib64/libbluetooth_jni.so ]; then
-    setup_magic_mount libbluetooth_jni.so
+    setup_magic_mount /system/lib64 libbluetooth_jni.so
 fi
