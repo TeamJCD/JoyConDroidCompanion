@@ -223,6 +223,11 @@ jcdshim  I  hook_cod[0]: CoD=0x... -> forcing 0x002508
 jcdshim  I  write_bt_addr: wrote AA:BB:CC:XX:XX:XX to /dev/btaddr
 ```
 
+On some stacks the address is not known yet at the first CoD write. The shim then
+logs `write_bt_addr: address not available yet, retrying in background` and
+retries every 500 ms for up to ~30 s, followed by
+`write_bt_addr: succeeded on retry N` and the `wrote` line above.
+
 If `patch_fn: hooked` lines are missing, the pattern scanner did not find the target
 function — the OEM may have a modified BT stack. Open an issue using the steps in
 [Filing a Bug Report](#filing-a-bug-report) below.
